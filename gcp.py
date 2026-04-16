@@ -296,6 +296,27 @@ def prompt_manual_project_id():
         print("输入不能为空，请重试。")
 
 
+def prompt_project_selection(items, project_id_fn, display_name_fn):
+    if not items:
+        return None
+
+    print("\n--- 请选择目标项目 ---")
+    for i, item in enumerate(items):
+        print(f"[{i+1}] {project_id_fn(item)} ({display_name_fn(item)})")
+
+    while True:
+        choice = input(f"请输入数字选择 (1-{len(items)}): ").strip()
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(items):
+                selected = items[idx]
+                selected_project_id = project_id_fn(selected)
+                selected_display_name = display_name_fn(selected)
+                print_info(f"已选择项目: {selected_project_id} ({selected_display_name})")
+                return selected_project_id
+        print("输入无效，请重试。")
+
+
 def list_active_projects_via_gcloud():
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
@@ -403,6 +424,21 @@ def handle_doctor(project_id=None):
 
 def select_gcp_project():
     print_info("正在扫描您的项目列表...")
+    gcloud_command = find_gcloud_command()
+    if gcloud_command:
+        try:
+            print_info("优先通过本机 gcloud 获取项目列表...")
+            active_projects = list_active_projects_via_gcloud()
+            if active_projects:
+                return prompt_project_selection(
+                    active_projects,
+                    project_id_fn=lambda item: item["project_id"],
+                    display_name_fn=lambda item: item["display_name"],
+                )
+            print_warning("gcloud 未返回任何活跃项目，将回退到 Resource Manager API。")
+        except Exception as e:
+            print_warning(f"通过 gcloud 列出项目失败，将回退到 Resource Manager API: {summarize_exception(e)}")
+
     try:
         client = projects_client()
         request = resourcemanager_v3.SearchProjectsRequest(query="")
@@ -417,44 +453,14 @@ def select_gcp_project():
             print_warning("未找到活跃的项目。请手动输入项目 ID。")
             return prompt_manual_project_id()
 
-        print("\n--- 请选择目标项目 ---")
-        for i, p in enumerate(active_projects):
-            print(f"[{i+1}] {p.project_id} ({p.display_name})")
-
-        while True:
-            choice = input(f"请输入数字选择 (1-{len(active_projects)}): ").strip()
-            if choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(active_projects):
-                    selected = active_projects[idx]
-                    print_info(f"已选择项目: {selected.project_id} ({selected.display_name})")
-                    return selected.project_id
-            print("输入无效，请重试。")
+        return prompt_project_selection(
+            active_projects,
+            project_id_fn=lambda item: item.project_id,
+            display_name_fn=lambda item: item.display_name,
+        )
     except Exception as e:
-        print_warning(f"通过 Resource Manager API 列出项目失败: {e}")
-        try:
-            print_info("正在尝试通过本机 gcloud 获取项目列表...")
-            active_projects = list_active_projects_via_gcloud()
-            if not active_projects:
-                print_warning("gcloud 未返回任何活跃项目。请手动输入项目 ID。")
-                return prompt_manual_project_id()
-
-            print("\n--- 请选择目标项目 ---")
-            for i, project in enumerate(active_projects):
-                print(f"[{i+1}] {project['project_id']} ({project['display_name']})")
-
-            while True:
-                choice = input(f"请输入数字选择 (1-{len(active_projects)}): ").strip()
-                if choice.isdigit():
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(active_projects):
-                        selected = active_projects[idx]
-                        print_info(f"已选择项目: {selected['project_id']} ({selected['display_name']})")
-                        return selected["project_id"]
-                print("输入无效，请重试。")
-        except Exception as fallback_error:
-            print_warning(f"无法列出项目: {fallback_error}。请手动输入项目 ID。")
-            return prompt_manual_project_id()
+        print_warning(f"无法列出项目: {e}。请手动输入项目 ID。")
+        return prompt_manual_project_id()
 
 
 def list_zones_for_region(project_id, region):
