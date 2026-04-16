@@ -615,12 +615,11 @@ def list_instances(project_id):
 
 
 def format_instance_display_line(inst, index=None):
-    status_color = "\033[92m" if inst.status == "RUNNING" else "\033[91m"
     network_short = inst.network.split("/")[-1] if inst.network else "-"
     prefix = f"[{index}] " if index is not None else "- "
     return (
         f"{prefix}{inst.name:<20} | 区域: {inst.zone:<15} | 状态: "
-        f"{status_color}{inst.status}\033[0m | 网络: {network_short} | 内网IP: "
+        f"{inst.status} | 网络: {network_short} | 内网IP: "
         f"{inst.internal_ip} | 外网IP: {inst.external_ip} | CPU: {inst.cpu_platform}"
     )
 
@@ -2526,6 +2525,7 @@ def main():
     configure_runtime_logging()
     ensure_google_cloud_libraries()
     print("GCP 免费服务器多功能管理工具")
+    sys.stdout.flush()
     project_id = select_gcp_project()
     context = RuntimeContext(project_id=project_id)
 

@@ -1,5 +1,7 @@
 from datetime import datetime
+import os
 from pathlib import Path
+import sys
 import threading
 
 
@@ -26,9 +28,34 @@ class AppLogger:
             with self._log_file.open("a", encoding="utf-8") as fh:
                 fh.write(f"[{timestamp}] [{level}] {message}\n")
 
+    def _should_use_color(self):
+        force_color = os.environ.get("GCP_FREE_FORCE_COLOR", "").strip().lower()
+        if force_color in {"1", "true", "yes", "on"}:
+            return True
+        if force_color in {"0", "false", "no", "off"}:
+            return False
+
+        stream = sys.stdout
+        if not hasattr(stream, "isatty") or not stream.isatty():
+            return False
+
+        # Windows 终端对 ANSI 支持差异较大，默认保守关闭，只在明确可识别的宿主里启用。
+        if os.name == "nt":
+            if os.environ.get("WT_SESSION"):
+                return True
+            if os.environ.get("ANSICON"):
+                return True
+            if os.environ.get("ConEmuANSI", "").upper() == "ON":
+                return True
+            if os.environ.get("TERM_PROGRAM", "").lower() == "vscode":
+                return True
+            return False
+
+        return True
+
     def _emit(self, level, prefix, message, color=None):
         text = f"{prefix} {message}"
-        if color:
+        if color and self._should_use_color():
             print(f"{color}{text}\033[0m")
         else:
             print(text)

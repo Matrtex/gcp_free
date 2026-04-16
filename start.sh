@@ -73,6 +73,7 @@ else
 fi
 
 export GCP_FREE_GCLOUD_COMMAND="$(command -v gcloud)"
+export PYTHONUNBUFFERED=1
 
 if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
   echo "[错误] 未找到依赖文件：$REQUIREMENTS_FILE" >&2
@@ -93,4 +94,4 @@ else
   echo "[初始化] Python 依赖已是最新。"
 fi
 
-exec python gcp.py
+exec python -u gcp.py

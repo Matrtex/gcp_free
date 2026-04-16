@@ -51,7 +51,20 @@ function Get-RequirementsHash {
         Write-ErrorMessage "requirements.txt was not found."
         exit 1
     }
-    return (Get-FileHash -Path $RequirementsFile -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($RequirementsFile)
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
+
+    return ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
 }
 
 $GcloudCommand = Resolve-GcloudCommand
@@ -60,6 +73,7 @@ if (-not $GcloudCommand) {
     exit 1
 }
 $env:GCP_FREE_GCLOUD_COMMAND = $GcloudCommand
+$env:PYTHONUNBUFFERED = "1"
 Add-CommandDirectoryToPath $GcloudCommand
 
 if (-not (Test-Path $VenvPython)) {
@@ -82,4 +96,4 @@ if ($CurrentDepsHash -ne $InstalledDepsHash) {
 }
 
 Write-Info "Starting gcp.py ..."
-& $VenvPython gcp.py @ArgsFromCaller
+& $VenvPython -u gcp.py @ArgsFromCaller
