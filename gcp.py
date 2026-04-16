@@ -1,3 +1,4 @@
+from collections import Counter
 import getpass
 import os
 import random
@@ -17,15 +18,11 @@ except ImportError:
     print("pip install google-cloud-compute google-cloud-resource-manager")
     sys.exit(1)
 
-GITHUB_REPO = "fatekey/gcp_free"
-GITHUB_BRANCH = "master"
-GITHUB_RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}"
-GITHUB_RAW_SCRIPTS_BASE = f"{GITHUB_RAW_BASE}/scripts"
-REMOTE_SCRIPT_URLS = {
-    "apt": f"{GITHUB_RAW_SCRIPTS_BASE}/apt.sh",
-    "dae": f"{GITHUB_RAW_SCRIPTS_BASE}/dae.sh",
-    "net_iptables": f"{GITHUB_RAW_SCRIPTS_BASE}/net_iptables.sh",
-    "net_shutdown": f"{GITHUB_RAW_SCRIPTS_BASE}/net_shutdown.sh",
+LOCAL_SCRIPT_FILES = {
+    "apt": "apt.sh",
+    "dae": "dae.sh",
+    "net_iptables": "net_iptables.sh",
+    "net_shutdown": "net_shutdown.sh",
 }
 FIREWALL_RULES_TO_CLEAN = [
     "allow-all-ingress-custom",
@@ -57,6 +54,10 @@ RETRY_JITTER_RATIO = 0.2
 RETRY_JITTER_CAP = 3
 COOLDOWN_JITTER_RATIO = 0.15
 COOLDOWN_JITTER_CAP = 4
+REROLL_RECENT_HISTORY_LIMIT = 8
+REMOTE_READY_TIMEOUT = 180
+REMOTE_READY_POLL_INTERVAL = 5
+REMOTE_PROBE_TIMEOUT = 20
 
 
 def print_info(msg):
@@ -81,12 +82,33 @@ def format_seconds(seconds):
     return f"{rounded:.1f}"
 
 
+def format_duration(seconds):
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{secs}秒"
+    if minutes:
+        return f"{minutes}分{secs}秒"
+    return f"{secs}秒"
+
+
 def apply_jitter(base_delay, jitter_ratio=RETRY_JITTER_RATIO, jitter_cap=RETRY_JITTER_CAP):
     if base_delay <= 0:
         return 0
 
     jitter_span = min(base_delay * jitter_ratio, jitter_cap)
     return base_delay + random.uniform(0, jitter_span)
+
+
+def remember_recent(history, value, limit=REROLL_RECENT_HISTORY_LIMIT):
+    history.append(value)
+    if len(history) > limit:
+        del history[0]
+
+
+def make_remote_temp_path(prefix, suffix):
+    return f"/tmp/{prefix}_{time.time_ns()}_{random.randint(1000, 9999)}{suffix}"
 
 
 def select_from_list(items, prompt_text, label_fn):
@@ -237,13 +259,49 @@ def create_instance(project_id, zone, os_config, instance_name="free-tier-vm"):
                 inst_info = get_instance_with_retry(instance_client, project_id, zone, instance_name)
                 ip = inst_info.network_interfaces[0].access_configs[0].nat_i_p
                 print(f"外部 IP 地址: {ip}")
+                print("请前往 GCP 控制台查看详情。")
+                return build_instance_info(inst_info, zone)
             except Exception:
-                pass
-            print("请前往 GCP 控制台查看详情。")
+                print("请前往 GCP 控制台查看详情。")
+                return {
+                    "name": instance_name,
+                    "zone": zone,
+                    "status": "PROVISIONING",
+                    "cpu_platform": "Unknown CPU Platform",
+                    "network": "global/networks/default",
+                    "internal_ip": "-",
+                    "external_ip": "-",
+                }
 
     except Exception as e:
         print(f"\n[失败] 操作中止: {e}")
         traceback.print_exc()
+    return None
+
+
+def build_instance_info(instance, zone):
+    network = None
+    internal_ip = "-"
+    external_ip = "-"
+    if instance.network_interfaces:
+        network = instance.network_interfaces[0].network
+        internal_ip = instance.network_interfaces[0].network_i_p
+        access_configs = instance.network_interfaces[0].access_configs
+        if access_configs:
+            external_ip = access_configs[0].nat_i_p or "-"
+    return {
+        "name": instance.name,
+        "zone": zone,
+        "status": instance.status,
+        "cpu_platform": instance.cpu_platform or "Unknown CPU Platform",
+        "network": network or "global/networks/default",
+        "internal_ip": internal_ip,
+        "external_ip": external_ip,
+    }
+
+
+def get_instance_cache_key(project_id, instance_info):
+    return f"{project_id}:{instance_info['zone']}:{instance_info['name']}"
 
 
 def list_instances(project_id):
@@ -258,26 +316,7 @@ def list_instances(project_id):
             continue
         zone_short = zone_path.split("/")[-1]
         for instance in response.instances:
-            network = None
-            internal_ip = "-"
-            external_ip = "-"
-            if instance.network_interfaces:
-                network = instance.network_interfaces[0].network
-                internal_ip = instance.network_interfaces[0].network_i_p
-                access_configs = instance.network_interfaces[0].access_configs
-                if access_configs:
-                    external_ip = access_configs[0].nat_i_p or "-"
-            instances.append(
-                {
-                    "name": instance.name,
-                    "zone": zone_short,
-                    "status": instance.status,
-                    "cpu_platform": instance.cpu_platform or "Unknown CPU Platform",
-                    "network": network or "global/networks/default",
-                    "internal_ip": internal_ip,
-                    "external_ip": external_ip,
-                }
-            )
+            instances.append(build_instance_info(instance, zone_short))
     return instances
 
 
@@ -311,6 +350,28 @@ def summarize_exception(exc, max_length=160):
     if len(message) <= max_length:
         return message
     return message[: max_length - 3] + "..."
+
+
+def print_reroll_summary(stats):
+    print("\n" + "-" * 50)
+    print_info("刷 AMD 运行摘要")
+    print(f"总耗时: {format_duration(time.time() - stats['start_time'])}")
+    print(f"尝试轮次: {stats['attempts']} | 异常轮次: {stats['exception_count']}")
+
+    if stats["success_cpu"]:
+        print_success(f"命中目标 CPU: {stats['success_cpu']}")
+
+    if stats["cpu_counter"]:
+        top_results = " | ".join(
+            f"{platform} x{count}" for platform, count in stats["cpu_counter"].most_common(5)
+        )
+        print(f"结果统计: {top_results}")
+
+    if stats["recent_results"]:
+        print(f"最近结果: {' -> '.join(stats['recent_results'])}")
+
+    if stats["recent_errors"]:
+        print(f"最近异常: {' | '.join(stats['recent_errors'])}")
 
 
 def is_transient_gcp_error(exc):
@@ -485,6 +546,30 @@ def get_instance_with_retry(instance_client, project_id, zone, instance_name):
         f"获取实例 {instance_name} 状态",
         lambda: instance_client.get(project=project_id, zone=zone, instance=instance_name),
     )
+
+
+def refresh_instance_info(project_id, instance_info, announce=False):
+    instance_client = compute_v1.InstancesClient()
+    instance_name = instance_info["name"]
+    zone = instance_info["zone"]
+    instance = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+    refreshed = build_instance_info(instance, zone)
+    if announce:
+        print_info(
+            f"已刷新实例详情: 状态 {refreshed['status']} | 外网IP: {refreshed['external_ip']} | "
+            f"CPU: {refreshed['cpu_platform']}"
+        )
+    return refreshed
+
+
+def prepare_instance_for_remote(project_id, instance_info, remote_config):
+    refreshed = refresh_instance_info(project_id, instance_info, announce=True)
+    if refreshed["status"] != "RUNNING":
+        print_warning(f"实例当前状态为 {refreshed['status']}，请先启动实例后再执行远程操作。")
+        return None
+    if not wait_for_remote_ready(project_id, refreshed, remote_config):
+        return None
+    return refreshed
 
 
 def start_instance_with_retry(instance_client, project_id, zone, instance_name):
@@ -693,50 +778,75 @@ def reroll_cpu_loop(project_id, instance_info):
 
     instance_client = compute_v1.InstancesClient()
     attempt_counter = 1
+    stats = {
+        "start_time": time.time(),
+        "attempts": 0,
+        "exception_count": 0,
+        "cpu_counter": Counter(),
+        "recent_results": [],
+        "recent_errors": [],
+        "success_cpu": None,
+    }
 
     print_info(f"目标实例: {instance_name} ({zone})")
     print_info("目标: 只要 CPU 包含 'AMD' 即停止。")
 
-    while True:
-        print("\n" + "=" * 50)
-        print_info(f"第 {attempt_counter} 次尝试...")
+    try:
+        while True:
+            stats["attempts"] += 1
+            print("\n" + "=" * 50)
+            print_info(f"第 {attempt_counter} 次尝试...")
 
-        try:
-            ensure_instance_running(instance_client, project_id, zone, instance_name)
-            current_platform, current_status = wait_for_cpu_platform(
-                instance_client, project_id, zone, instance_name
-            )
+            try:
+                ensure_instance_running(instance_client, project_id, zone, instance_name)
+                current_platform, current_status = wait_for_cpu_platform(
+                    instance_client, project_id, zone, instance_name
+                )
 
-            if current_platform is None:
-                if current_status == "RUNNING":
-                    current_platform = "CPU 信息同步超时"
+                if current_platform is None:
+                    if current_status == "RUNNING":
+                        current_platform = "CPU 信息同步超时"
+                    else:
+                        current_platform = f"实例未稳定运行（当前状态: {current_status}）"
+                    print_warning(f"本轮未拿到有效 CPU 信息：{current_platform}")
                 else:
-                    current_platform = f"实例未稳定运行（当前状态: {current_status}）"
-                print_warning(f"本轮未拿到有效 CPU 信息：{current_platform}")
-            else:
-                print_info(f"检测到 CPU: {current_platform}")
+                    print_info(f"检测到 CPU: {current_platform}")
 
-            if "AMD" in str(current_platform).upper():
-                print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
-                print_info("脚本执行完毕。")
-                break
+                current_platform = str(current_platform)
+                stats["cpu_counter"][current_platform] += 1
+                remember_recent(stats["recent_results"], current_platform)
 
-            print_warning(f"结果不满意 ({current_platform})。准备重置...")
-            print_info(f"正在关停虚拟机 {instance_name}...")
-            ensure_instance_stopped(instance_client, project_id, zone, instance_name)
-        except Exception as e:
-            print_warning(f"本轮尝试遇到异常，将自动恢复后继续: {summarize_exception(e)}")
+                if "AMD" in current_platform.upper():
+                    stats["success_cpu"] = current_platform
+                    print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
+                    print_info("脚本执行完毕。")
+                    break
 
-        attempt_counter += 1
-        cooldown = apply_jitter(
-            REROLL_LOOP_COOLDOWN,
-            jitter_ratio=COOLDOWN_JITTER_RATIO,
-            jitter_cap=COOLDOWN_JITTER_CAP,
-        )
-        print_info(
-            f"为降低 GCP API 抖动和频率限制影响，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
-        )
-        time.sleep(cooldown)
+                print_warning(f"结果不满意 ({current_platform})。准备重置...")
+                print_info(f"正在关停虚拟机 {instance_name}...")
+                ensure_instance_stopped(instance_client, project_id, zone, instance_name)
+            except Exception as e:
+                stats["exception_count"] += 1
+                remember_recent(stats["recent_errors"], summarize_exception(e), limit=5)
+                print_warning(f"本轮尝试遇到异常，将自动恢复后继续: {summarize_exception(e)}")
+
+            attempt_counter += 1
+            cooldown = apply_jitter(
+                REROLL_LOOP_COOLDOWN,
+                jitter_ratio=COOLDOWN_JITTER_RATIO,
+                jitter_cap=COOLDOWN_JITTER_CAP,
+            )
+            print_info(
+                f"为降低 GCP API 抖动和频率限制影响，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
+            )
+            time.sleep(cooldown)
+    finally:
+        print_reroll_summary(stats)
+
+    try:
+        return refresh_instance_info(project_id, instance_info, announce=False)
+    except Exception:
+        return instance_info
 
 
 def read_cdn_ips(filename="cdnip.txt"):
@@ -970,17 +1080,73 @@ def pick_remote_method():
     return {"method": "ssh", "user": ssh_user, "port": ssh_port, "key": ssh_key}
 
 
-def build_remote_download_command(script_url):
+def get_remote_config_for_instance(project_id, instance_info, remote_config_cache):
+    cache_key = get_instance_cache_key(project_id, instance_info)
+    remote_config = remote_config_cache.get(cache_key)
+    if remote_config:
+        return remote_config
+
+    remote_config = pick_remote_method()
+    if remote_config:
+        remote_config_cache[cache_key] = remote_config
+    return remote_config
+
+
+def get_local_script_path(script_key):
+    script_name = LOCAL_SCRIPT_FILES.get(script_key)
+    if not script_name:
+        print_warning("未知的脚本类型，无法执行。")
+        return None
+
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", script_name)
+    if not os.path.isfile(local_path):
+        print_warning(f"找不到本地脚本文件: {local_path}")
+        return None
+    return local_path
+
+
+def build_remote_script_exec_command(remote_script_path):
     return (
         "set -e;"
-        "if command -v curl >/dev/null 2>&1; then DL=\"curl -fsSL\";"
-        "elif command -v wget >/dev/null 2>&1; then DL=\"wget -qO-\";"
-        "else echo \"error: curl or wget not found\"; exit 1; fi;"
-        "tmp=$(mktemp /tmp/gcp_free.XXXXXX.sh);"
-        f"$DL \"{script_url}\" > \"$tmp\";"
-        "sudo bash \"$tmp\";"
-        "rm -f \"$tmp\""
+        f"tmp='{remote_script_path}';"
+        "cleanup(){ rm -f \"$tmp\"; };"
+        "trap cleanup EXIT;"
+        "sudo bash \"$tmp\""
     )
+
+
+def run_subprocess_command(cmd, action_desc, timeout=None):
+    try:
+        result = subprocess.run(cmd, timeout=timeout)
+        if result.returncode == 0:
+            return True
+        print_warning(f"{action_desc}失败，退出码: {result.returncode}")
+        return False
+    except subprocess.TimeoutExpired:
+        print_warning(f"{action_desc}失败：执行超时。")
+        return False
+    except Exception as e:
+        print_warning(f"{action_desc}失败: {e}")
+        return False
+
+
+def run_subprocess_capture_command(cmd, action_desc, timeout=REMOTE_PROBE_TIMEOUT):
+    try:
+        result = subprocess.run(
+            cmd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        return (
+            result.returncode == 0,
+            (result.stdout or "").strip(),
+            (result.stderr or "").strip(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "", f"{action_desc}超时"
+    except Exception as e:
+        return False, "", str(e)
 
 
 def build_remote_exec_command(project_id, instance_info, remote_config, remote_command):
@@ -1018,6 +1184,98 @@ def build_remote_exec_command(project_id, instance_info, remote_config, remote_c
 
     print_warning("远程执行方式未设置。")
     return None
+
+
+def probe_remote_command(project_id, instance_info, remote_config, remote_command, action_desc):
+    cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
+    if not cmd:
+        return False, "", "无法构建远程执行命令"
+    return run_subprocess_capture_command(cmd, action_desc)
+
+
+def wait_for_remote_ready(project_id, instance_info, remote_config):
+    print_info("正在等待 SSH 服务就绪...")
+    deadline = time.time() + REMOTE_READY_TIMEOUT
+    attempt_counter = 0
+
+    while time.time() < deadline:
+        attempt_counter += 1
+        success, stdout, _ = probe_remote_command(
+            project_id,
+            instance_info,
+            remote_config,
+            "echo gcp_free_ready",
+            "探测 SSH 就绪状态",
+        )
+        if success and "gcp_free_ready" in stdout:
+            print_success("SSH 服务已就绪。")
+            return True
+
+        if attempt_counter == 1 or attempt_counter % 3 == 0:
+            print_info(f"SSH 尚未就绪，继续等待... ({attempt_counter} 次探测)")
+
+        sleep_time = apply_jitter(REMOTE_READY_POLL_INTERVAL, jitter_ratio=0.1, jitter_cap=2)
+        time.sleep(sleep_time)
+
+    print_warning(f"等待 SSH 就绪超时（{format_duration(REMOTE_READY_TIMEOUT)}）。")
+    return False
+
+
+def parse_os_release(content):
+    data = {}
+    for line in content.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+
+    return {
+        "id": data.get("ID", "unknown").lower(),
+        "version_id": data.get("VERSION_ID", "unknown"),
+        "pretty_name": data.get("PRETTY_NAME", "Unknown OS"),
+    }
+
+
+def detect_remote_os_info(project_id, instance_info, remote_config):
+    success, stdout, stderr = probe_remote_command(
+        project_id,
+        instance_info,
+        remote_config,
+        "cat /etc/os-release",
+        "检测远程操作系统",
+    )
+    if not success or not stdout:
+        print_warning(f"无法识别远程系统类型，将跳过系统校验: {stderr or '无返回内容'}")
+        return None
+
+    os_info = parse_os_release(stdout)
+    print_info(f"远程系统: {os_info['pretty_name']} (ID={os_info['id']}, VERSION_ID={os_info['version_id']})")
+    return os_info
+
+
+def validate_remote_script_os(script_key, os_info):
+    if not os_info:
+        return True
+
+    os_id = os_info["id"]
+    if script_key == "apt" and os_id not in {"debian", "ubuntu"}:
+        print_warning(f"脚本 apt.sh 仅建议在 Debian/Ubuntu 上运行，当前系统为 {os_info['pretty_name']}。")
+        return False
+
+    if script_key in {"net_iptables", "net_shutdown"} and os_id != "debian":
+        print_warning(f"脚本 {script_key} 仅适配 Debian，当前系统为 {os_info['pretty_name']}。")
+        return False
+
+    return True
+
+
+def validate_dae_config_os(os_info):
+    if not os_info:
+        return True
+
+    if os_info["id"] not in {"debian", "ubuntu"}:
+        print_warning(f"当前系统为 {os_info['pretty_name']}，dae 配置流程未做专门适配，请自行确认。")
+    return True
 
 
 def build_remote_upload_command(project_id, instance_info, remote_config, local_path, remote_path):
@@ -1060,26 +1318,40 @@ def build_remote_upload_command(project_id, instance_info, remote_config, local_
 
 
 def run_remote_script(project_id, instance_info, script_key, remote_config):
-    script_url = REMOTE_SCRIPT_URLS.get(script_key)
-    if not script_url:
-        print_warning("未知的脚本类型，无法执行。")
-        return False
-    remote_command = build_remote_download_command(script_url)
-    cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
-    if not cmd:
+    local_script = get_local_script_path(script_key)
+    if not local_script:
         return False
 
-    print_info(f"正在远程执行脚本: {script_url}")
-    try:
-        result = subprocess.run(cmd)
-        if result.returncode == 0:
-            print_success("远程脚本执行完成。")
-            return True
-        print_warning(f"远程脚本执行失败，退出码: {result.returncode}")
+    os_info = detect_remote_os_info(project_id, instance_info, remote_config)
+    if not validate_remote_script_os(script_key, os_info):
         return False
-    except Exception as e:
-        print_warning(f"远程执行失败: {e}")
+
+    remote_tmp = make_remote_temp_path("gcp_free_script", ".sh")
+    upload_cmd = build_remote_upload_command(
+        project_id,
+        instance_info,
+        remote_config,
+        local_script,
+        remote_tmp,
+    )
+    if not upload_cmd:
         return False
+
+    remote_command = build_remote_script_exec_command(remote_tmp)
+    exec_cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
+    if not exec_cmd:
+        return False
+
+    print_info(f"正在上传本地脚本: {local_script}")
+    if not run_subprocess_command(upload_cmd, "上传远程脚本"):
+        return False
+
+    print_info(f"正在远程执行本地脚本: {os.path.basename(local_script)}")
+    if not run_subprocess_command(exec_cmd, "远程脚本执行"):
+        return False
+
+    print_success("远程脚本执行完成。")
+    return True
 
 
 def select_traffic_monitor_script():
@@ -1104,7 +1376,11 @@ def deploy_dae_config(project_id, instance_info, remote_config):
         print_warning(f"找不到本地配置文件: {local_config}")
         return False
 
-    remote_tmp = "/tmp/config.dae"
+    os_info = detect_remote_os_info(project_id, instance_info, remote_config)
+    if not validate_dae_config_os(os_info):
+        return False
+
+    remote_tmp = make_remote_temp_path("gcp_free_config", ".dae")
     upload_cmd = build_remote_upload_command(
         project_id,
         instance_info,
@@ -1116,46 +1392,34 @@ def deploy_dae_config(project_id, instance_info, remote_config):
         return False
 
     print_info("正在上传 config.dae ...")
-    try:
-        result = subprocess.run(upload_cmd)
-        if result.returncode != 0:
-            print_warning(f"上传失败，退出码: {result.returncode}")
-            return False
-    except Exception as e:
-        print_warning(f"上传失败: {e}")
+    if not run_subprocess_command(upload_cmd, "上传 config.dae"):
         return False
 
     remote_command = (
         "set -e;"
         "sudo mkdir -p /usr/local/etc/dae;"
-        "sudo cp /tmp/config.dae /usr/local/etc/dae/config.dae;"
+        f"sudo cp '{remote_tmp}' /usr/local/etc/dae/config.dae;"
         "sudo chmod 600 /usr/local/etc/dae/config.dae;"
         "sudo systemctl enable dae;"
         "sudo systemctl restart dae;"
-        "rm -f /tmp/config.dae"
+        f"rm -f '{remote_tmp}'"
     )
     exec_cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
     if not exec_cmd:
         return False
 
     print_info("正在应用配置并重启 dae ...")
-    try:
-        result = subprocess.run(exec_cmd)
-        if result.returncode == 0:
-            print_success("配置已更新并重启 dae。")
-            return True
-        print_warning(f"配置应用失败，退出码: {result.returncode}")
+    if not run_subprocess_command(exec_cmd, "应用 dae 配置"):
         return False
-    except Exception as e:
-        print_warning(f"配置应用失败: {e}")
-        return False
+    print_success("配置已更新并重启 dae。")
+    return True
 
 
 def main():
     print("GCP 免费服务器多功能管理工具")
     project_id = select_gcp_project()
     current_instance = None
-    remote_config = None
+    remote_config_cache = {}
 
     while True:
         print("\n================================================")
@@ -1180,14 +1444,16 @@ def main():
         if choice == "1":
             zone = select_zone(project_id)
             os_config = select_os_image()
-            create_instance(project_id, zone, os_config)
+            created_instance = create_instance(project_id, zone, os_config)
+            if created_instance:
+                current_instance = created_instance
         elif choice == "2":
             current_instance = select_instance(project_id)
         elif choice == "3":
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
-                reroll_cpu_loop(project_id, current_instance)
+                current_instance = reroll_cpu_loop(project_id, current_instance)
         elif choice == "4":
             if not current_instance:
                 current_instance = select_instance(project_id)
@@ -1198,41 +1464,51 @@ def main():
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
-                if not remote_config:
-                    remote_config = pick_remote_method()
+                remote_config = get_remote_config_for_instance(project_id, current_instance, remote_config_cache)
                 if remote_config:
-                    run_remote_script(project_id, current_instance, "apt", remote_config)
+                    remote_instance = prepare_instance_for_remote(project_id, current_instance, remote_config)
+                    if remote_instance:
+                        current_instance = remote_instance
+                        run_remote_script(project_id, current_instance, "apt", remote_config)
         elif choice == "6":
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
-                if not remote_config:
-                    remote_config = pick_remote_method()
+                remote_config = get_remote_config_for_instance(project_id, current_instance, remote_config_cache)
                 if remote_config:
-                    run_remote_script(project_id, current_instance, "dae", remote_config)
+                    remote_instance = prepare_instance_for_remote(project_id, current_instance, remote_config)
+                    if remote_instance:
+                        current_instance = remote_instance
+                        run_remote_script(project_id, current_instance, "dae", remote_config)
         elif choice == "7":
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
-                if not remote_config:
-                    remote_config = pick_remote_method()
+                remote_config = get_remote_config_for_instance(project_id, current_instance, remote_config_cache)
                 if remote_config:
-                    deploy_dae_config(project_id, current_instance, remote_config)
+                    remote_instance = prepare_instance_for_remote(project_id, current_instance, remote_config)
+                    if remote_instance:
+                        current_instance = remote_instance
+                        deploy_dae_config(project_id, current_instance, remote_config)
         elif choice == "8":
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
-                script_key = select_traffic_monitor_script()
-                if script_key:
-                    if not remote_config:
-                        remote_config = pick_remote_method()
-                    if remote_config:
-                        run_remote_script(project_id, current_instance, script_key, remote_config)
+                remote_config = get_remote_config_for_instance(project_id, current_instance, remote_config_cache)
+                if remote_config:
+                    remote_instance = prepare_instance_for_remote(project_id, current_instance, remote_config)
+                    if remote_instance:
+                        current_instance = remote_instance
+                        script_key = select_traffic_monitor_script()
+                        if script_key:
+                            run_remote_script(project_id, current_instance, script_key, remote_config)
         elif choice == "9":
             if not current_instance:
                 current_instance = select_instance(project_id)
             if current_instance:
+                cache_key = get_instance_cache_key(project_id, current_instance)
                 if delete_free_resources(project_id, current_instance):
+                    remote_config_cache.pop(cache_key, None)
                     current_instance = None
         elif choice == "0":
             print("已退出。")
