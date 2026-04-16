@@ -1,5 +1,7 @@
+import argparse
 from collections import Counter
 import getpass
+import math
 import os
 import random
 import shutil
@@ -8,15 +10,20 @@ import sys
 import time
 import traceback
 
+IMPORT_ERROR_MESSAGE = (
+    "【错误】缺少必要的 Python 库。\n"
+    "请先在终端运行以下命令安装：\n"
+    "pip install google-cloud-compute google-cloud-resource-manager"
+)
+
 try:
     from google.cloud import compute_v1
     from google.cloud import resourcemanager_v3
     from google.api_core import exceptions as google_exceptions
 except ImportError:
-    print("【错误】缺少必要的 Python 库。")
-    print("请先在终端运行以下命令安装：")
-    print("pip install google-cloud-compute google-cloud-resource-manager")
-    sys.exit(1)
+    compute_v1 = None
+    resourcemanager_v3 = None
+    google_exceptions = None
 
 LOCAL_SCRIPT_FILES = {
     "apt": "apt.sh",
@@ -58,6 +65,15 @@ REROLL_RECENT_HISTORY_LIMIT = 8
 REMOTE_READY_TIMEOUT = 180
 REMOTE_READY_POLL_INTERVAL = 5
 REMOTE_PROBE_TIMEOUT = 20
+REMOTE_UPLOAD_TIMEOUT = 300
+REMOTE_COMMAND_TIMEOUT = 1800
+REMOTE_CONFIG_APPLY_TIMEOUT = 300
+SSH_CONNECT_TIMEOUT = 10
+SSH_SERVER_ALIVE_INTERVAL = 15
+SSH_SERVER_ALIVE_COUNT_MAX = 3
+SSH_STRICT_HOST_KEY_CHECKING = "accept-new"
+SUBPROCESS_ERROR_SUMMARY_LIMIT = 600
+SUBPROCESS_ERROR_LINE_LIMIT = 8
 
 
 def print_info(msg):
@@ -73,6 +89,13 @@ def print_success(msg):
 def print_warning(msg):
     print(f"\033[93m[警告] {msg}\033[0m")
     sys.stdout.flush()
+
+
+def ensure_google_cloud_libraries():
+    if compute_v1 and resourcemanager_v3 and google_exceptions:
+        return
+    print(IMPORT_ERROR_MESSAGE)
+    sys.exit(1)
 
 
 def format_seconds(seconds):
@@ -93,6 +116,36 @@ def format_duration(seconds):
     return f"{secs}秒"
 
 
+def sleep_with_countdown(total_seconds, message):
+    remaining_seconds = max(0.0, float(total_seconds))
+    if remaining_seconds <= 0:
+        return
+
+    deadline = time.time() + remaining_seconds
+    last_display = None
+    last_message_length = 0
+
+    while True:
+        remaining = max(0.0, deadline - time.time())
+        display_seconds = max(0, math.ceil(remaining))
+        if display_seconds != last_display:
+            output = f"\r[信息] {message}，剩余 {display_seconds} 秒..."
+            sys.stdout.write(output)
+            if last_message_length > len(output):
+                sys.stdout.write(" " * (last_message_length - len(output)))
+            sys.stdout.flush()
+            last_display = display_seconds
+            last_message_length = len(output)
+
+        if remaining <= 0:
+            break
+
+        time.sleep(min(0.2, remaining))
+
+    sys.stdout.write("\r" + " " * last_message_length + "\r")
+    sys.stdout.flush()
+
+
 def apply_jitter(base_delay, jitter_ratio=RETRY_JITTER_RATIO, jitter_cap=RETRY_JITTER_CAP):
     if base_delay <= 0:
         return 0
@@ -109,6 +162,102 @@ def remember_recent(history, value, limit=REROLL_RECENT_HISTORY_LIMIT):
 
 def make_remote_temp_path(prefix, suffix):
     return f"/tmp/{prefix}_{time.time_ns()}_{random.randint(1000, 9999)}{suffix}"
+
+
+def summarize_text_block(
+    text,
+    max_lines=SUBPROCESS_ERROR_LINE_LIMIT,
+    max_length=SUBPROCESS_ERROR_SUMMARY_LIMIT,
+):
+    if not text:
+        return ""
+
+    cleaned_lines = []
+    for raw_line in str(text).splitlines():
+        line = " ".join(raw_line.strip().split())
+        if line:
+            cleaned_lines.append(line)
+
+    if not cleaned_lines:
+        return ""
+
+    summary = "\n".join(cleaned_lines[:max_lines])
+    if len(cleaned_lines) > max_lines:
+        summary += "\n..."
+    if len(summary) > max_length:
+        summary = summary[: max_length - 3] + "..."
+    return summary
+
+
+def get_region_config(region):
+    for config in REGION_OPTIONS:
+        if config["region"] == region:
+            return config
+    return None
+
+
+def resolve_zone_for_create(zone=None, region=None):
+    if zone:
+        return zone
+
+    if not region:
+        raise ValueError("非交互创建实例时必须提供 --zone 或 --region。")
+
+    region_config = get_region_config(region)
+    if not region_config:
+        supported_regions = ", ".join(item["region"] for item in REGION_OPTIONS)
+        raise ValueError(f"不支持的区域: {region}。可选值: {supported_regions}")
+
+    return region_config["default_zone"]
+
+
+def resolve_os_config(os_value):
+    alias_map = {
+        "debian": "debian-12",
+        "debian-12": "debian-12",
+        "ubuntu": "ubuntu-2204-lts",
+        "ubuntu-2204-lts": "ubuntu-2204-lts",
+    }
+    normalized = alias_map.get((os_value or "").strip().lower())
+    if not normalized:
+        supported = ", ".join(sorted(alias_map))
+        raise ValueError(f"不支持的操作系统选项: {os_value}。可选值: {supported}")
+
+    for item in OS_IMAGE_OPTIONS:
+        if item["family"] == normalized:
+            return item
+
+    raise ValueError(f"未找到操作系统配置: {os_value}")
+
+
+def build_ssh_option_values(include_identities_only=False):
+    option_values = [
+        f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+        f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL}",
+        f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
+        "BatchMode=yes",
+        f"StrictHostKeyChecking={SSH_STRICT_HOST_KEY_CHECKING}",
+    ]
+    if include_identities_only:
+        option_values.append("IdentitiesOnly=yes")
+    return option_values
+
+
+def extend_ssh_options(cmd, option_values):
+    for option_value in option_values:
+        cmd += ["-o", option_value]
+    return cmd
+
+
+def extend_gcloud_passthrough_flags(cmd, flag_name, option_values):
+    for option_value in option_values:
+        cmd.append(f"{flag_name}=-o")
+        cmd.append(f"{flag_name}={option_value}")
+    return cmd
+
+
+def format_command_for_log(cmd):
+    return subprocess.list2cmdline([str(part) for part in cmd])
 
 
 def select_from_list(items, prompt_text, label_fn):
@@ -320,6 +469,40 @@ def list_instances(project_id):
     return instances
 
 
+def format_instance_display_line(inst, index=None):
+    status_color = "\033[92m" if inst["status"] == "RUNNING" else "\033[91m"
+    network_short = inst["network"].split("/")[-1] if inst["network"] else "-"
+    prefix = f"[{index}] " if index is not None else "- "
+    return (
+        f"{prefix}{inst['name']:<20} | 区域: {inst['zone']:<15} | 状态: "
+        f"{status_color}{inst['status']}\033[0m | 网络: {network_short} | 内网IP: "
+        f"{inst['internal_ip']} | 外网IP: {inst['external_ip']} | CPU: {inst['cpu_platform']}"
+    )
+
+
+def print_instance_list(instances, numbered=False):
+    for idx, inst in enumerate(instances, start=1):
+        print(format_instance_display_line(inst, idx if numbered else None))
+
+
+def find_instance_by_name(project_id, instance_name, zone=None):
+    instances = list_instances(project_id)
+    matched_instances = [
+        inst
+        for inst in instances
+        if inst["name"] == instance_name and (not zone or inst["zone"] == zone)
+    ]
+
+    if not matched_instances:
+        zone_hint = f"（zone={zone}）" if zone else ""
+        raise ValueError(f"未找到实例: {instance_name}{zone_hint}")
+
+    if len(matched_instances) > 1:
+        raise ValueError(f"找到多个同名实例 {instance_name}，请补充 --zone 指定可用区。")
+
+    return matched_instances[0]
+
+
 def select_instance(project_id):
     instances = list_instances(project_id)
     if not instances:
@@ -327,14 +510,7 @@ def select_instance(project_id):
         return None
 
     print("\n--- 请选择目标服务器 ---")
-    for i, inst in enumerate(instances):
-        status_color = "\033[92m" if inst["status"] == "RUNNING" else "\033[91m"
-        network_short = inst["network"].split("/")[-1] if inst["network"] else "-"
-        print(
-            f"[{i+1}] {inst['name']:<20} | 区域: {inst['zone']:<15} | 状态: "
-            f"{status_color}{inst['status']}\033[0m | 网络: {network_short} | 内网IP: "
-            f"{inst['internal_ip']} | 外网IP: {inst['external_ip']} | CPU: {inst['cpu_platform']}"
-        )
+    print_instance_list(instances, numbered=True)
 
     while True:
         choice = input(f"请输入数字选择 (1-{len(instances)}): ").strip()
@@ -839,7 +1015,8 @@ def reroll_cpu_loop(project_id, instance_info):
             print_info(
                 f"为降低 GCP API 抖动和频率限制影响，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
             )
-            time.sleep(cooldown)
+            sleep_with_countdown(cooldown, "冷却中")
+            print_info("冷却结束，开始下一轮尝试。")
     finally:
         print_reroll_summary(stats)
 
@@ -971,6 +1148,40 @@ def configure_firewall(project_id, network):
     print("\n所有操作完成。")
 
 
+def configure_firewall_non_interactive(
+    project_id,
+    network,
+    allow_all_ingress=False,
+    deny_cdn_egress=False,
+    cdnip_filename="cdnip.txt",
+):
+    if not allow_all_ingress and not deny_cdn_egress:
+        raise ValueError("非交互防火墙模式至少要指定 --allow-all-ingress 或 --deny-cdn-egress。")
+
+    print("\n------------------------------------------------")
+    print("防火墙规则管理（非交互模式）")
+    print("------------------------------------------------")
+    print(f"目标网络: {network}")
+
+    if allow_all_ingress:
+        add_allow_all_ingress(project_id, network)
+    else:
+        print("已跳过入站规则配置。")
+
+    if deny_cdn_egress:
+        ips = read_cdn_ips(cdnip_filename)
+        if ips:
+            if len(ips) > 256:
+                print(f"【警告】IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
+                print("脚本将只取前 256 个 IP。")
+                ips = ips[:256]
+            add_deny_cdn_egress(project_id, ips, network)
+    else:
+        print("已跳过出站规则配置。")
+
+    print("\n所有操作完成。")
+
+
 def is_not_found_error(exc):
     msg = str(exc).lower()
     return "notfound" in msg or "not found" in msg or "404" in msg
@@ -1010,7 +1221,7 @@ def delete_disks_if_needed(project_id, zone, disk_names):
     return all_ok
 
 
-def delete_free_resources(project_id, instance_info):
+def delete_free_resources(project_id, instance_info, confirmed=False):
     instance_name = instance_info["name"]
     zone = instance_info["zone"]
 
@@ -1019,10 +1230,13 @@ def delete_free_resources(project_id, instance_info):
     print(f"- 实例: {instance_name} ({zone})")
     print(f"- 相关磁盘（如仍存在）")
     print(f"- 防火墙规则: {', '.join(FIREWALL_RULES_TO_CLEAN)}")
-    confirm = input("请输入 DELETE 确认删除: ").strip()
-    if confirm != "DELETE":
-        print("已取消删除操作。")
-        return False
+    if not confirmed:
+        confirm = input("请输入 DELETE 确认删除: ").strip()
+        if confirm != "DELETE":
+            print("已取消删除操作。")
+            return False
+    else:
+        print_info("已通过非交互参数确认删除。")
 
     instance_client = compute_v1.InstancesClient()
     disk_names = []
@@ -1117,16 +1331,30 @@ def build_remote_script_exec_command(remote_script_path):
 
 def run_subprocess_command(cmd, action_desc, timeout=None):
     try:
-        result = subprocess.run(cmd, timeout=timeout)
+        result = subprocess.run(
+            cmd,
+            timeout=timeout,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
         if result.returncode == 0:
             return True
         print_warning(f"{action_desc}失败，退出码: {result.returncode}")
+        stderr_summary = summarize_text_block(result.stderr)
+        if stderr_summary:
+            print_warning(f"{action_desc}错误摘要:\n{stderr_summary}")
         return False
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         print_warning(f"{action_desc}失败：执行超时。")
+        stderr_summary = summarize_text_block(exc.stderr)
+        if stderr_summary:
+            print_warning(f"{action_desc}超时前输出:\n{stderr_summary}")
+        print_info(f"命令: {format_command_for_log(cmd)}")
         return False
     except Exception as e:
         print_warning(f"{action_desc}失败: {e}")
+        print_info(f"命令: {format_command_for_log(cmd)}")
         return False
 
 
@@ -1137,6 +1365,7 @@ def run_subprocess_capture_command(cmd, action_desc, timeout=REMOTE_PROBE_TIMEOU
             timeout=timeout,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
         )
         return (
             result.returncode == 0,
@@ -1153,9 +1382,10 @@ def build_remote_exec_command(project_id, instance_info, remote_config, remote_c
     instance_name = instance_info["name"]
     zone = instance_info["zone"]
     method = remote_config.get("method")
+    ssh_options = build_ssh_option_values()
 
     if method == "gcloud":
-        return [
+        cmd = [
             "gcloud",
             "compute",
             "ssh",
@@ -1167,6 +1397,7 @@ def build_remote_exec_command(project_id, instance_info, remote_config, remote_c
             "--command",
             remote_command,
         ]
+        return extend_gcloud_passthrough_flags(cmd, "--ssh-flag", ssh_options)
     if method == "ssh":
         host = instance_info.get("external_ip")
         if not host or host == "-":
@@ -1179,6 +1410,7 @@ def build_remote_exec_command(project_id, instance_info, remote_config, remote_c
         key_path = remote_config.get("key")
         if key_path:
             cmd += ["-i", key_path]
+        extend_ssh_options(cmd, build_ssh_option_values(include_identities_only=bool(key_path)))
         cmd += [f"{remote_config.get('user')}@{host}", remote_command]
         return cmd
 
@@ -1200,7 +1432,7 @@ def wait_for_remote_ready(project_id, instance_info, remote_config):
 
     while time.time() < deadline:
         attempt_counter += 1
-        success, stdout, _ = probe_remote_command(
+        success, stdout, stderr = probe_remote_command(
             project_id,
             instance_info,
             remote_config,
@@ -1212,7 +1444,8 @@ def wait_for_remote_ready(project_id, instance_info, remote_config):
             return True
 
         if attempt_counter == 1 or attempt_counter % 3 == 0:
-            print_info(f"SSH 尚未就绪，继续等待... ({attempt_counter} 次探测)")
+            reason = summarize_text_block(stderr or stdout, max_lines=1, max_length=120) or "无返回内容"
+            print_info(f"SSH 尚未就绪，继续等待... ({attempt_counter} 次探测) | 最近响应: {reason}")
 
         sleep_time = apply_jitter(REMOTE_READY_POLL_INTERVAL, jitter_ratio=0.1, jitter_cap=2)
         time.sleep(sleep_time)
@@ -1282,9 +1515,11 @@ def build_remote_upload_command(project_id, instance_info, remote_config, local_
     instance_name = instance_info["name"]
     zone = instance_info["zone"]
     method = remote_config.get("method")
+    key_path = remote_config.get("key")
+    ssh_options = build_ssh_option_values(include_identities_only=bool(key_path))
 
     if method == "gcloud":
-        return [
+        cmd = [
             "gcloud",
             "compute",
             "scp",
@@ -1295,6 +1530,7 @@ def build_remote_upload_command(project_id, instance_info, remote_config, local_
             "--zone",
             zone,
         ]
+        return extend_gcloud_passthrough_flags(cmd, "--scp-flag", ssh_options)
     if method == "ssh":
         if shutil.which("scp") is None:
             print_warning("未找到 scp 命令，无法上传文件。")
@@ -1307,9 +1543,9 @@ def build_remote_upload_command(project_id, instance_info, remote_config, local_
         port = remote_config.get("port")
         if port:
             cmd += ["-P", str(port)]
-        key_path = remote_config.get("key")
         if key_path:
             cmd += ["-i", key_path]
+        extend_ssh_options(cmd, ssh_options)
         cmd += [local_path, f"{remote_config.get('user')}@{host}:{remote_path}"]
         return cmd
 
@@ -1343,11 +1579,11 @@ def run_remote_script(project_id, instance_info, script_key, remote_config):
         return False
 
     print_info(f"正在上传本地脚本: {local_script}")
-    if not run_subprocess_command(upload_cmd, "上传远程脚本"):
+    if not run_subprocess_command(upload_cmd, "上传远程脚本", timeout=REMOTE_UPLOAD_TIMEOUT):
         return False
 
     print_info(f"正在远程执行本地脚本: {os.path.basename(local_script)}")
-    if not run_subprocess_command(exec_cmd, "远程脚本执行"):
+    if not run_subprocess_command(exec_cmd, "远程脚本执行", timeout=REMOTE_COMMAND_TIMEOUT):
         return False
 
     print_success("远程脚本执行完成。")
@@ -1392,7 +1628,7 @@ def deploy_dae_config(project_id, instance_info, remote_config):
         return False
 
     print_info("正在上传 config.dae ...")
-    if not run_subprocess_command(upload_cmd, "上传 config.dae"):
+    if not run_subprocess_command(upload_cmd, "上传 config.dae", timeout=REMOTE_UPLOAD_TIMEOUT):
         return False
 
     remote_command = (
@@ -1409,13 +1645,248 @@ def deploy_dae_config(project_id, instance_info, remote_config):
         return False
 
     print_info("正在应用配置并重启 dae ...")
-    if not run_subprocess_command(exec_cmd, "应用 dae 配置"):
+    if not run_subprocess_command(exec_cmd, "应用 dae 配置", timeout=REMOTE_CONFIG_APPLY_TIMEOUT):
         return False
     print_success("配置已更新并重启 dae。")
     return True
 
 
+def build_remote_config_from_args(args):
+    has_gcloud = shutil.which("gcloud") is not None
+    has_ssh = shutil.which("ssh") is not None
+    requested_method = getattr(args, "remote_method", None)
+
+    if not requested_method and (
+        any(getattr(args, attr_name, None) for attr_name in ("ssh_user", "ssh_key"))
+        or str(getattr(args, "ssh_port", "22") or "22") != "22"
+    ):
+        requested_method = "ssh"
+
+    if requested_method == "gcloud":
+        if not has_gcloud:
+            raise ValueError("当前环境未安装 gcloud，无法使用 gcloud 远程模式。")
+        return {"method": "gcloud"}
+
+    if requested_method == "ssh" or (not requested_method and not has_gcloud):
+        if not has_ssh:
+            raise ValueError("当前环境未安装 ssh，无法使用 SSH 远程模式。")
+        ssh_key = getattr(args, "ssh_key", "") or ""
+        if ssh_key:
+            ssh_key = os.path.expanduser(ssh_key)
+            if not os.path.isfile(ssh_key):
+                raise ValueError(f"SSH 私钥文件不存在: {ssh_key}")
+        return {
+            "method": "ssh",
+            "user": getattr(args, "ssh_user", None) or getpass.getuser(),
+            "port": str(getattr(args, "ssh_port", "22") or "22"),
+            "key": ssh_key,
+        }
+
+    if has_gcloud:
+        return {"method": "gcloud"}
+
+    if has_ssh:
+        ssh_key = getattr(args, "ssh_key", "") or ""
+        if ssh_key:
+            ssh_key = os.path.expanduser(ssh_key)
+            if not os.path.isfile(ssh_key):
+                raise ValueError(f"SSH 私钥文件不存在: {ssh_key}")
+        return {
+            "method": "ssh",
+            "user": getattr(args, "ssh_user", None) or getpass.getuser(),
+            "port": str(getattr(args, "ssh_port", "22") or "22"),
+            "key": ssh_key,
+        }
+
+    raise ValueError("当前环境既没有 gcloud，也没有 ssh，无法执行远程操作。")
+
+
+def get_cli_instance(args):
+    return find_instance_by_name(args.project_id, args.instance, getattr(args, "zone", None))
+
+
+def prepare_cli_remote_instance(args):
+    instance_info = get_cli_instance(args)
+    remote_config = build_remote_config_from_args(args)
+    remote_instance = prepare_instance_for_remote(args.project_id, instance_info, remote_config)
+    if not remote_instance:
+        raise RuntimeError("远程实例尚未就绪，无法继续执行远程操作。")
+    return remote_instance, remote_config
+
+
+def handle_create_cli(args):
+    zone = resolve_zone_for_create(args.zone, args.region)
+    os_config = resolve_os_config(args.os)
+    created_instance = create_instance(
+        args.project_id,
+        zone,
+        os_config,
+        instance_name=args.instance_name,
+    )
+    if not created_instance:
+        raise RuntimeError("创建实例失败。")
+
+
+def handle_list_instances_cli(args):
+    instances = list_instances(args.project_id)
+    if not instances:
+        print_warning("该项目中没有任何实例。")
+        return
+    print_instance_list(instances, numbered=False)
+
+
+def handle_reroll_amd_cli(args):
+    instance_info = get_cli_instance(args)
+    reroll_cpu_loop(args.project_id, instance_info)
+
+
+def handle_firewall_cli(args):
+    instance_info = get_cli_instance(args)
+    network = instance_info.get("network") or "global/networks/default"
+    configure_firewall_non_interactive(
+        args.project_id,
+        network,
+        allow_all_ingress=args.allow_all_ingress,
+        deny_cdn_egress=args.deny_cdn_egress,
+        cdnip_filename=args.cdnip_file,
+    )
+
+
+def handle_run_script_cli(args):
+    remote_instance, remote_config = prepare_cli_remote_instance(args)
+    if not run_remote_script(args.project_id, remote_instance, args.script_key, remote_config):
+        raise RuntimeError("远程脚本执行失败。")
+
+
+def handle_deploy_dae_config_cli(args):
+    remote_instance, remote_config = prepare_cli_remote_instance(args)
+    if not deploy_dae_config(args.project_id, remote_instance, remote_config):
+        raise RuntimeError("dae 配置部署失败。")
+
+
+def handle_delete_resources_cli(args):
+    if not args.yes:
+        raise ValueError("非交互删除资源时必须显式传入 --yes。")
+    instance_info = get_cli_instance(args)
+    if not delete_free_resources(args.project_id, instance_info, confirmed=True):
+        raise RuntimeError("删除资源失败。")
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="GCP 免费服务器多功能管理工具")
+    subparsers = parser.add_subparsers(dest="cli_action", metavar="命令")
+
+    project_parent = argparse.ArgumentParser(add_help=False)
+    project_parent.add_argument("--project-id", required=True, help="GCP 项目 ID")
+
+    instance_parent = argparse.ArgumentParser(add_help=False)
+    instance_parent.add_argument("--project-id", required=True, help="GCP 项目 ID")
+    instance_parent.add_argument("--instance", required=True, help="实例名称")
+    instance_parent.add_argument("--zone", help="实例所在可用区；存在同名实例时建议显式指定")
+
+    remote_parent = argparse.ArgumentParser(add_help=False)
+    remote_parent.add_argument(
+        "--remote-method",
+        choices=["gcloud", "ssh"],
+        help="远程连接方式，默认优先 gcloud",
+    )
+    remote_parent.add_argument("--ssh-user", help="SSH 用户名，仅在 ssh 模式下生效")
+    remote_parent.add_argument("--ssh-port", default="22", help="SSH 端口，仅在 ssh 模式下生效")
+    remote_parent.add_argument("--ssh-key", help="SSH 私钥路径，仅在 ssh 模式下生效")
+
+    create_parser = subparsers.add_parser("create", parents=[project_parent], help="新建免费实例")
+    create_parser.add_argument("--zone", help="实例部署可用区，例如 us-west1-b")
+    create_parser.add_argument(
+        "--region",
+        choices=[item["region"] for item in REGION_OPTIONS],
+        help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区",
+    )
+    create_parser.add_argument(
+        "--os",
+        default="debian-12",
+        choices=["debian", "debian-12", "ubuntu", "ubuntu-2204-lts"],
+        help="实例操作系统，默认 debian-12",
+    )
+    create_parser.add_argument("--instance-name", default="free-tier-vm", help="实例名称")
+    create_parser.set_defaults(handler=handle_create_cli)
+
+    list_parser = subparsers.add_parser(
+        "list-instances",
+        parents=[project_parent],
+        help="列出项目中的实例",
+    )
+    list_parser.set_defaults(handler=handle_list_instances_cli)
+
+    reroll_parser = subparsers.add_parser(
+        "reroll-amd",
+        parents=[instance_parent],
+        help="循环重刷 CPU，直到命中 AMD",
+    )
+    reroll_parser.set_defaults(handler=handle_reroll_amd_cli)
+
+    firewall_parser = subparsers.add_parser(
+        "firewall",
+        parents=[instance_parent],
+        help="非交互配置防火墙规则",
+    )
+    firewall_parser.add_argument(
+        "--allow-all-ingress",
+        action="store_true",
+        help="添加允许所有入站连接的规则",
+    )
+    firewall_parser.add_argument(
+        "--deny-cdn-egress",
+        action="store_true",
+        help="添加拒绝 cdnip.txt 中 IP 的出站规则",
+    )
+    firewall_parser.add_argument("--cdnip-file", default="cdnip.txt", help="CDN IP 列表文件路径")
+    firewall_parser.set_defaults(handler=handle_firewall_cli)
+
+    run_script_parser = subparsers.add_parser(
+        "run-script",
+        parents=[instance_parent, remote_parent],
+        help="上传并执行本地远程脚本",
+    )
+    run_script_parser.add_argument(
+        "script_key",
+        choices=sorted(LOCAL_SCRIPT_FILES.keys()),
+        help="脚本类型",
+    )
+    run_script_parser.set_defaults(handler=handle_run_script_cli)
+
+    dae_config_parser = subparsers.add_parser(
+        "deploy-dae-config",
+        parents=[instance_parent, remote_parent],
+        help="上传 config.dae 并重启 dae",
+    )
+    dae_config_parser.set_defaults(handler=handle_deploy_dae_config_cli)
+
+    delete_parser = subparsers.add_parser(
+        "delete-resources",
+        parents=[instance_parent],
+        help="删除实例、磁盘和关联防火墙规则",
+    )
+    delete_parser.add_argument("--yes", action="store_true", help="确认执行删除")
+    delete_parser.set_defaults(handler=handle_delete_resources_cli)
+
+    return parser
+
+
+def parse_args(argv=None):
+    return build_arg_parser().parse_args(argv)
+
+
+def run_cli(args):
+    handler = getattr(args, "handler", None)
+    if not handler:
+        return False
+    ensure_google_cloud_libraries()
+    handler(args)
+    return True
+
+
 def main():
+    ensure_google_cloud_libraries()
     print("GCP 免费服务器多功能管理工具")
     project_id = select_gcp_project()
     current_instance = None
@@ -1519,7 +1990,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        args = parse_args()
+        if not run_cli(args):
+            main()
     except KeyboardInterrupt:
         print("\n[用户终止] 脚本已停止。")
     except Exception as e:
