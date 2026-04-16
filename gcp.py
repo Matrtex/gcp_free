@@ -992,7 +992,8 @@ def reroll_cpu_loop(project_id, instance_info):
                 stats["cpu_counter"][current_platform] += 1
                 remember_recent(stats["recent_results"], current_platform)
 
-                if "AMD" in current_platform.upper():
+                current_platform_upper = current_platform.upper()
+                if "AMD" in current_platform_upper or "EPYC" in current_platform_upper:
                     stats["success_cpu"] = current_platform
                     print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
                     print_info("脚本执行完毕。")
