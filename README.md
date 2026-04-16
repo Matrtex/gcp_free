@@ -36,7 +36,29 @@ cd ~/gcp_free && bash start.sh
 - 已安装 Google Cloud SDK（`gcloud`）
 - 已登录并具备对应项目权限（建议先 `gcloud auth application-default login`）
 - Python 3
-### 运行脚本
+### Windows PowerShell 运行脚本
+
+先确保 `gcloud` 可用，并完成这两步认证：
+
+```powershell
+gcloud auth login
+gcloud auth application-default login
+```
+
+然后在仓库目录执行：
+
+```powershell
+.\start.ps1
+```
+
+如果你想直接使用非交互 CLI，也可以这样执行：
+
+```powershell
+.\start.ps1 list-instances --project-id <你的项目ID>
+.\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
+```
+
+### Linux / WSL / Git Bash 运行脚本
 
 使用 `start.sh` 自动初始化环境：
 
@@ -55,6 +77,17 @@ bash start.sh
 
 ## 手动运行
 
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install google-cloud-compute google-cloud-resource-manager
+gcloud auth application-default login
+.\.venv\Scripts\python.exe gcp.py
+```
+
+Linux / macOS / WSL：
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -65,6 +98,7 @@ python gcp.py
 ## 脚本说明
 
 - `gcp.py`: 主控制脚本
+- `start.ps1`: Windows PowerShell 启动脚本
 - `config.dae`: dae 配置模板
 - `scripts/apt.sh`: 换源脚本
 - `scripts/dae.sh`: 安装 dae
