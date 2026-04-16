@@ -36,6 +36,8 @@ from gcp_config import (
     INSTANCE_API_MAX_RETRIES,
     INSTANCE_API_RETRY_BASE_DELAY,
     INSTANCE_CONFLICT_RETRY_DELAY,
+    INSTANCE_TRANSITION_CONFIRM_POLL_INTERVAL,
+    INSTANCE_TRANSITION_CONFIRM_TIMEOUT,
     INSTANCE_STATUS_POLL_INTERVAL,
     INSTANCE_STATUS_WAIT_TIMEOUT,
     LOCAL_SCRIPT_FILES,
@@ -330,6 +332,50 @@ def list_active_projects_via_gcloud():
     return active_projects
 
 
+def build_instance_info_from_gcloud(item):
+    zone_value = item.get("zone", "")
+    zone = zone_value.split("/")[-1] if zone_value else "unknown-zone"
+    network_interface = (item.get("networkInterfaces") or [{}])[0]
+    access_configs = network_interface.get("accessConfigs") or [{}]
+    return InstanceInfo(
+        name=item.get("name", ""),
+        zone=zone,
+        status=item.get("status", "UNKNOWN"),
+        cpu_platform=item.get("cpuPlatform") or "Unknown CPU Platform",
+        network=network_interface.get("network") or "global/networks/default",
+        internal_ip=network_interface.get("networkIP") or "-",
+        external_ip=access_configs[0].get("natIP") or "-",
+    )
+
+
+def list_instances_via_gcloud(project_id):
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        raise RuntimeError("当前环境未找到 gcloud，无法通过 CLI 获取实例列表。")
+
+    result = subprocess.run(
+        [
+            gcloud_command,
+            "compute",
+            "instances",
+            "list",
+            "--project",
+            project_id,
+            "--format=json(name,zone,status,cpuPlatform,networkInterfaces.network,networkInterfaces.networkIP,networkInterfaces.accessConfigs.natIP)",
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        raise RuntimeError(f"gcloud compute instances list 执行失败: {stderr_summary}")
+
+    raw_instances = json.loads(result.stdout or "[]")
+    return [build_instance_info_from_gcloud(item) for item in raw_instances]
+
+
 def print_doctor_results(checks):
     print("\n--- 环境预检结果 ---")
     status_counter = Counter(item.status for item in checks)
@@ -532,11 +578,25 @@ def get_instance_cache_key(project_id, instance_info):
     return f"{project_id}:{instance_info.zone}:{instance_info.name}"
 
 
+def get_instance_by_name_with_zone(project_id, instance_name, zone):
+    instance_client = instances_client()
+    instance = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+    return build_instance_info(instance, zone)
+
+
 def list_instances(project_id):
+    print_info(f"正在扫描项目 {project_id} 中的实例...")
+
+    gcloud_command = find_gcloud_command()
+    if gcloud_command:
+        try:
+            # 本地/Cloud Shell 下 gcloud 通常比 Python REST 聚合扫描更快，优先走这条快路径。
+            return list_instances_via_gcloud(project_id)
+        except Exception as e:
+            print_warning(f"通过 gcloud 获取实例列表失败，改用 API 回退: {summarize_exception(e)}")
+
     instance_client = instances_client()
     request = compute_v1.AggregatedListInstancesRequest(project=project_id)
-
-    print_info(f"正在扫描项目 {project_id} 中的实例...")
 
     instances = []
     for zone_path, response in aggregated_list_instances_with_retry(instance_client, request, project_id):
@@ -565,6 +625,14 @@ def print_instance_list(instances, numbered=False):
 
 
 def find_instance_by_name(project_id, instance_name, zone=None):
+    # 已知 zone 时直接按实例名读取，避免每次都把整个项目的实例列表扫一遍。
+    if zone:
+        try:
+            return get_instance_by_name_with_zone(project_id, instance_name, zone)
+        except Exception as e:
+            if not is_not_found_error(e):
+                raise
+
     instances = list_instances(project_id)
     matched_instances = [
         inst
@@ -696,6 +764,7 @@ def print_reroll_progress(stats, state_path):
 
 
 def get_reroll_cooldown_policy(had_exception=False, stop_wait_seconds=0):
+    # 正常轮次尽量快刷；只有异常时才放大退避，避免把 502/409 频率继续顶高。
     if had_exception:
         return REROLL_ERROR_COOLDOWN, "本轮出现异常，使用保护性冷却"
     if stop_wait_seconds >= REROLL_STOP_WAIT_THRESHOLD:
@@ -1038,6 +1107,34 @@ def wait_for_instance_status(
     return None, last_status or "UNKNOWN"
 
 
+def wait_for_instance_status_change(
+    instance_client,
+    project_id,
+    zone,
+    instance_name,
+    from_statuses,
+    timeout=INSTANCE_TRANSITION_CONFIRM_TIMEOUT,
+    poll_interval=INSTANCE_TRANSITION_CONFIRM_POLL_INTERVAL,
+):
+    from_statuses = set(from_statuses)
+    deadline = time.time() + timeout
+    last_status = None
+
+    while time.time() < deadline:
+        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        current_status = current_inst.status or "UNKNOWN"
+        if current_status not in from_statuses:
+            return current_inst, current_status
+
+        if current_status != last_status:
+            print_info(f"实例当前状态: {current_status}，继续等待状态变化...")
+            last_status = current_status
+
+        time.sleep(poll_interval)
+
+    return None, last_status or "UNKNOWN"
+
+
 def ensure_instance_running(instance_client, project_id, zone, instance_name):
     current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
     current_status = current_inst.status or "UNKNOWN"
@@ -1054,8 +1151,23 @@ def ensure_instance_running(instance_client, project_id, zone, instance_name):
     if current_status in {"TERMINATED", "STOPPED"}:
         print_info(f"正在启动虚拟机 {instance_name}...")
         operation = start_instance_with_retry(instance_client, project_id, zone, instance_name)
-        wait_for_operation(project_id, zone, operation.name, f"启动虚拟机 {instance_name}")
-        print_info("虚拟机已通电，正在等待系统初始化...")
+        # 先盯实例状态变化，能避免“operation 已提交成功但我们还在同步等待”造成的重复耗时。
+        changed_inst, changed_status = wait_for_instance_status_change(
+            instance_client,
+            project_id,
+            zone,
+            instance_name,
+            {"TERMINATED", "STOPPED"},
+        )
+        if changed_inst is None:
+            print_info("实例状态尚未变化，继续检查启动操作状态...")
+            wait_for_operation(project_id, zone, operation.name, f"启动虚拟机 {instance_name}")
+            print_info("虚拟机已通电，正在等待系统初始化...")
+        elif changed_status == "RUNNING":
+            print_info("虚拟机已进入 RUNNING。")
+            return changed_inst
+        else:
+            print_info(f"虚拟机已进入 {changed_status}，正在等待系统初始化...")
     elif current_status != "RUNNING":
         print_info(f"虚拟机当前状态为 {current_status}，等待其进入 RUNNING...")
 
@@ -1113,7 +1225,21 @@ def ensure_instance_stopped(instance_client, project_id, zone, instance_name):
         print_info(f"虚拟机 {instance_name} 正在关停，等待其完全停止...")
     else:
         operation = stop_instance_with_retry(instance_client, project_id, zone, instance_name)
-        wait_for_operation(project_id, zone, operation.name, f"关停虚拟机 {instance_name}")
+        # 关停同样优先看状态变化，只有状态迟迟不动时才回退等 operation。
+        changed_inst, changed_status = wait_for_instance_status_change(
+            instance_client,
+            project_id,
+            zone,
+            instance_name,
+            {"RUNNING"},
+        )
+        if changed_inst is None:
+            print_info("实例状态尚未变化，继续检查关停操作状态...")
+            wait_for_operation(project_id, zone, operation.name, f"关停虚拟机 {instance_name}")
+        elif changed_status in {"TERMINATED", "STOPPED"}:
+            return changed_inst, max(0.0, time.time() - stop_start_time)
+        else:
+            print_info(f"实例已进入 {changed_status}，继续等待完全停止...")
 
     stopped_inst, last_status = wait_for_instance_status(
         instance_client, project_id, zone, instance_name, {"TERMINATED", "STOPPED"}
@@ -1140,6 +1266,7 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
             instance_name=instance_name,
             zone=zone,
         ):
+            # 已经命中过的状态文件只用于查看，不自动续跑，避免误以为脚本还在继续刷。
             if existing_stats.success_cpu:
                 print_warning("检测到状态文件已记录命中结果，本次将忽略旧状态并重新开始。")
             else:
@@ -1227,11 +1354,14 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
                 jitter_ratio=COOLDOWN_JITTER_RATIO,
                 jitter_cap=COOLDOWN_JITTER_CAP,
             )
-            print_info(
-                f"{cooldown_reason}，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
-            )
-            sleep_with_countdown(cooldown, "冷却中")
-            print_info("冷却结束，开始下一轮尝试。")
+            if cooldown <= 0:
+                print_info(f"{cooldown_reason}，直接开始下一轮尝试。")
+            else:
+                print_info(
+                    f"{cooldown_reason}，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
+                )
+                sleep_with_countdown(cooldown, "冷却中")
+                print_info("冷却结束，开始下一轮尝试。")
     finally:
         print_reroll_summary(stats)
         print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态文件摘要")
