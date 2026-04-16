@@ -124,27 +124,24 @@ def sleep_with_countdown(total_seconds, message):
 
     deadline = time.time() + remaining_seconds
     last_display = None
-    last_message_length = 0
 
     while True:
         remaining = max(0.0, deadline - time.time())
         display_seconds = max(0, math.ceil(remaining))
         if display_seconds != last_display:
-            output = f"\r[信息] {message}，剩余 {display_seconds} 秒..."
-            sys.stdout.write(output)
-            if last_message_length > len(output):
-                sys.stdout.write(" " * (last_message_length - len(output)))
-            sys.stdout.flush()
+            should_print = (
+                last_display is None
+                or display_seconds <= 5
+                or display_seconds % 5 == 0
+            )
+            if should_print:
+                print_info(f"{message}，剩余 {display_seconds} 秒...")
             last_display = display_seconds
-            last_message_length = len(output)
 
         if remaining <= 0:
             break
 
         time.sleep(min(0.2, remaining))
-
-    sys.stdout.write("\r" + " " * last_message_length + "\r")
-    sys.stdout.flush()
 
 
 def apply_jitter(base_delay, jitter_ratio=RETRY_JITTER_RATIO, jitter_cap=RETRY_JITTER_CAP):
@@ -1024,7 +1021,7 @@ def reroll_cpu_loop(project_id, instance_info):
     }
 
     print_info(f"目标实例: {instance_name} ({zone})")
-    print_info("目标: 只要 CPU 包含 'AMD' 即停止。")
+    print_info("目标: 只要 CPU 包含 'AMD' 或 'EPYC' 即停止。")
 
     try:
         while True:
