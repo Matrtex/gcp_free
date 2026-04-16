@@ -36,6 +36,27 @@ class ModelsTestCase(unittest.TestCase):
         self.assertEqual(payload["cpu_counter"]["AMD EPYC Milan"], 2)
         self.assertEqual(payload["last_cpu"], "AMD EPYC Milan")
 
+    def test_reroll_stats_roundtrip(self):
+        stats = RerollStats(
+            project_id="demo-project",
+            instance_name="test-vm",
+            zone="us-west1-a",
+            start_time=123.0,
+            attempts=9,
+            exception_count=2,
+            success_cpu="AMD EPYC Milan",
+            last_cpu="AMD EPYC Milan",
+            last_error="timeout",
+            last_updated=456.0,
+        )
+        stats.cpu_counter["AMD EPYC Milan"] = 3
+        stats.recent_results.extend(["Intel Broadwell", "AMD EPYC Milan"])
+        stats.recent_errors.append("timeout")
+
+        restored = RerollStats.from_dict(stats.to_dict())
+
+        self.assertEqual(restored, stats)
+
 
 if __name__ == "__main__":
     unittest.main()

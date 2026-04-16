@@ -12,6 +12,12 @@ class DoctorTestCase(unittest.TestCase):
         return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
     @patch("gcp_doctor.shutil.which")
+    @patch("gcp_doctor.collect_workspace_checks", return_value=[])
+    @patch(
+        "gcp_doctor.get_enabled_gcp_services",
+        return_value=({"compute.googleapis.com", "cloudresourcemanager.googleapis.com"}, []),
+    )
+    @patch("gcp_doctor.get_current_gcloud_project", return_value=("demo-project", ""))
     @patch("gcp_doctor.find_python_command", return_value="/mock/python")
     @patch("gcp_doctor.find_gcloud_command", return_value="/mock/gcloud")
     @patch("gcp_doctor.subprocess.run")
@@ -20,13 +26,15 @@ class DoctorTestCase(unittest.TestCase):
         mock_run,
         _mock_find_gcloud,
         _mock_find_python,
+        _mock_current_project,
+        _mock_services,
+        _mock_workspace_checks,
         mock_which,
     ):
         mock_which.side_effect = lambda name: f"/mock/{name}" if name in {"ssh", "scp"} else None
         mock_run.side_effect = [
             self._completed(stdout="demo@example.com"),
             self._completed(stdout="token"),
-            self._completed(stdout="demo-project"),
         ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -44,6 +52,9 @@ class DoctorTestCase(unittest.TestCase):
         self.assertIn("demo@example.com", message_map["gcloud-auth"])
 
     @patch("gcp_doctor.shutil.which")
+    @patch("gcp_doctor.collect_workspace_checks", return_value=[])
+    @patch("gcp_doctor.get_enabled_gcp_services", return_value=(set(), []))
+    @patch("gcp_doctor.get_current_gcloud_project", return_value=("", "未设置默认项目"))
     @patch("gcp_doctor.find_python_command", return_value="/mock/python")
     @patch("gcp_doctor.find_gcloud_command", return_value="/mock/gcloud")
     @patch("gcp_doctor.subprocess.run")
@@ -52,6 +63,9 @@ class DoctorTestCase(unittest.TestCase):
         mock_run,
         _mock_find_gcloud,
         _mock_find_python,
+        _mock_current_project,
+        _mock_services,
+        _mock_workspace_checks,
         mock_which,
     ):
         mock_which.side_effect = lambda name: None
@@ -84,6 +98,9 @@ class DoctorTestCase(unittest.TestCase):
             self.assertEqual(find_python_command(), "C:/Python/python.exe")
 
     @patch("gcp_doctor.shutil.which")
+    @patch("gcp_doctor.collect_workspace_checks", return_value=[])
+    @patch("gcp_doctor.get_enabled_gcp_services", return_value=(set(), []))
+    @patch("gcp_doctor.get_current_gcloud_project", return_value=("", "未设置默认项目"))
     @patch("gcp_doctor.find_python_command", return_value="/mock/python")
     @patch("gcp_doctor.find_gcloud_command", return_value="/mock/gcloud")
     @patch("gcp_doctor.subprocess.run")
@@ -92,6 +109,9 @@ class DoctorTestCase(unittest.TestCase):
         mock_run,
         _mock_find_gcloud,
         _mock_find_python,
+        _mock_current_project,
+        _mock_services,
+        _mock_workspace_checks,
         mock_which,
     ):
         mock_which.side_effect = lambda name: None
@@ -108,6 +128,24 @@ class DoctorTestCase(unittest.TestCase):
 
         status_map = {item.name: item.status for item in checks}
         self.assertEqual(status_map["gcloud-auth"], "WARN")
+
+    def test_collect_workspace_checks_reports_missing_optional_files_as_warn(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            scripts_dir = workspace / "scripts"
+            scripts_dir.mkdir()
+            for script_name in ("apt.sh", "dae.sh", "net_iptables.sh", "net_shutdown.sh"):
+                (scripts_dir / script_name).write_text("#!/bin/bash\n", encoding="utf-8")
+
+            from gcp_doctor import collect_workspace_checks
+
+            checks = collect_workspace_checks(workspace)
+
+        status_map = {item.name: item.status for item in checks}
+        self.assertEqual(status_map["scripts"], "PASS")
+        self.assertEqual(status_map["config.dae"], "WARN")
+        self.assertEqual(status_map["log-dir"], "PASS")
+        self.assertEqual(status_map["state-dir"], "PASS")
 
     @patch("gcp_doctor.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["gcloud"], timeout=5))
     def test_run_command_returns_error_when_subprocess_times_out(self, _mock_run):

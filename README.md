@@ -104,6 +104,18 @@ python gcp.py
 .\start.ps1 doctor --project-id <你的项目ID>
 ```
 
+刷 CPU 状态查看：
+
+```powershell
+.\start.ps1 show-reroll-state
+```
+
+从状态文件恢复刷 CPU：
+
+```powershell
+.\start.ps1 reroll-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+```
+
 非交互远程 dry-run：
 
 ```powershell
@@ -121,6 +133,15 @@ python gcp.py
 ```text
 .gcp_free_state/reroll_state.json
 ```
+
+`doctor` 现在会额外检查：
+
+- 当前账号与 ADC 状态
+- 默认项目与目标项目是否一致
+- `compute.googleapis.com` / `cloudresourcemanager.googleapis.com` 是否已启用
+- `scripts/` 目录是否完整
+- `config.dae` / `cdnip.txt` 是否已准备
+- `.gcp_free_logs/` 与 `.gcp_free_state/` 是否可写
 
 ## 脚本说明
 

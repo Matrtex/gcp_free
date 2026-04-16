@@ -11,13 +11,19 @@ def load_json_state(path, default=None):
     target = Path(path)
     if not target.exists():
         return default
-    with target.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with target.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
 def save_json_state(path, payload):
     ensure_parent_dir(path)
     data = dict(payload)
     data.setdefault("saved_at", time.time())
-    with Path(path).open("w", encoding="utf-8") as fh:
+    target = Path(path)
+    temp_path = target.with_suffix(f"{target.suffix}.tmp")
+    with temp_path.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+    temp_path.replace(target)

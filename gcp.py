@@ -51,10 +51,13 @@ from gcp_config import (
     REMOTE_READY_TIMEOUT,
     REMOTE_UPLOAD_TIMEOUT,
     REQUIREMENTS_FILE,
+    REROLL_ERROR_COOLDOWN,
     RETRY_JITTER_CAP,
     RETRY_JITTER_RATIO,
     REROLL_LOOP_COOLDOWN,
+    REROLL_POST_STOP_FAST_COOLDOWN,
     REROLL_RECENT_HISTORY_LIMIT,
+    REROLL_STOP_WAIT_THRESHOLD,
     SSH_CONNECT_TIMEOUT,
     SSH_SERVER_ALIVE_COUNT_MAX,
     SSH_SERVER_ALIVE_INTERVAL,
@@ -67,7 +70,7 @@ from gcp_config import (
 from gcp_doctor import find_gcloud_command, run_doctor
 from gcp_logging import configure_logger, get_logger
 from gcp_models import ActionSpec, DoctorCheck, InstanceInfo, RemoteConfig, RerollStats, RuntimeContext
-from gcp_state import save_json_state
+from gcp_state import load_json_state, save_json_state
 
 LOGGER = get_logger()
 
@@ -119,6 +122,13 @@ def get_default_log_file():
     log_dir = os.path.join(root_dir, LOG_DIR_NAME)
     os.makedirs(log_dir, exist_ok=True)
     return os.path.join(log_dir, "gcp_free.log")
+
+
+def get_default_reroll_state_file():
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    state_dir = os.path.join(root_dir, STATE_DIR_NAME)
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, DEFAULT_REROLL_STATE_FILE)
 
 
 def configure_runtime_logging(log_file=None):
@@ -322,6 +332,7 @@ def list_active_projects_via_gcloud():
 
 def print_doctor_results(checks):
     print("\n--- 环境预检结果 ---")
+    status_counter = Counter(item.status for item in checks)
     for item in checks:
         prefix = {
             "PASS": "[通过]",
@@ -329,6 +340,10 @@ def print_doctor_results(checks):
             "FAIL": "[失败]",
         }.get(item.status, "[信息]")
         print(f"{prefix} {item.name}: {item.message}")
+    print(
+        f"\n汇总: 通过 {status_counter.get('PASS', 0)} 项 | "
+        f"警告 {status_counter.get('WARN', 0)} 项 | 失败 {status_counter.get('FAIL', 0)} 项"
+    )
 
 
 def handle_doctor(project_id=None):
@@ -612,6 +627,101 @@ def print_reroll_summary(stats):
 
     if stats.recent_errors:
         print(f"最近异常: {' | '.join(stats.recent_errors)}")
+
+
+def format_timestamp(timestamp_value):
+    if not timestamp_value:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_value))
+
+
+def load_reroll_stats_from_file(state_path):
+    payload = load_json_state(state_path, default=None)
+    if not payload:
+        return None
+    required_keys = {"project_id", "instance_name", "zone", "start_time"}
+    if not required_keys.issubset(payload):
+        return None
+    try:
+        return RerollStats.from_dict(payload)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def is_reroll_state_compatible(stats, project_id=None, instance_name=None, zone=None):
+    if not stats:
+        return False
+    if project_id and stats.project_id != project_id:
+        return False
+    if instance_name and stats.instance_name != instance_name:
+        return False
+    if zone and stats.zone != zone:
+        return False
+    return True
+
+
+def print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态"):
+    print("\n" + "-" * 50)
+    print_info(title)
+    print(f"状态文件: {state_path}")
+    print(f"目标项目: {stats.project_id}")
+    print(f"目标实例: {stats.instance_name} ({stats.zone})")
+    print(f"开始时间: {format_timestamp(stats.start_time)}")
+    print(f"最后更新: {format_timestamp(stats.last_updated)}")
+    print(f"累计尝试: {stats.attempts} | 累计异常: {stats.exception_count}")
+    print(f"最近 CPU: {stats.last_cpu or '-'}")
+    print(f"最近异常: {stats.last_error or '-'}")
+    if stats.success_cpu:
+        print_success(f"状态文件记录的命中 CPU: {stats.success_cpu}")
+    if stats.cpu_counter:
+        top_results = " | ".join(
+            f"{platform} x{count}" for platform, count in Counter(stats.cpu_counter).most_common(5)
+        )
+        print(f"累计结果: {top_results}")
+    if stats.recent_results:
+        print(f"最近结果: {' -> '.join(stats.recent_results)}")
+    if stats.recent_errors:
+        print(f"最近异常列表: {' | '.join(stats.recent_errors)}")
+
+
+def print_reroll_progress(stats, state_path):
+    top_cpu = "-"
+    if stats.cpu_counter:
+        top_cpu, top_count = Counter(stats.cpu_counter).most_common(1)[0]
+        top_cpu = f"{top_cpu} x{top_count}"
+    print_info(
+        f"累计进度: 已尝试 {stats.attempts} 次 | 异常 {stats.exception_count} 次 | "
+        f"最高频结果 {top_cpu} | 状态文件 {state_path}"
+    )
+
+
+def get_reroll_cooldown_policy(had_exception=False, stop_wait_seconds=0):
+    if had_exception:
+        return REROLL_ERROR_COOLDOWN, "本轮出现异常，使用保护性冷却"
+    if stop_wait_seconds >= REROLL_STOP_WAIT_THRESHOLD:
+        return REROLL_POST_STOP_FAST_COOLDOWN, "本轮已等待较久实例关停，跳过长冷却"
+    return REROLL_LOOP_COOLDOWN, "正常轮次，使用短冷却"
+
+
+def show_reroll_state(state_file=None, project_id=None, instance_info=None):
+    state_path = state_file or get_default_reroll_state_file()
+    stats = load_reroll_stats_from_file(state_path)
+    if not stats:
+        print_warning(f"未找到有效的刷 CPU 状态文件: {state_path}")
+        return False
+
+    if instance_info and not is_reroll_state_compatible(
+        stats,
+        project_id=project_id,
+        instance_name=instance_info.name,
+        zone=instance_info.zone,
+    ):
+        print_warning("状态文件存在，但与当前选中的实例不一致，下面显示文件中的实际目标。")
+    elif project_id and not is_reroll_state_compatible(stats, project_id=project_id):
+        print_warning("状态文件存在，但与当前项目不一致，下面显示文件中的实际目标。")
+
+    print_reroll_state_snapshot(stats, state_path, title="当前刷 CPU 状态")
+    return True
 
 
 def is_transient_gcp_error(exc):
@@ -991,12 +1101,13 @@ def wait_for_cpu_platform(
 
 
 def ensure_instance_stopped(instance_client, project_id, zone, instance_name):
+    stop_start_time = time.time()
     current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
     current_status = current_inst.status or "UNKNOWN"
 
     if current_status in {"TERMINATED", "STOPPED"}:
         print_info(f"虚拟机 {instance_name} 已处于关机状态，跳过关停请求。")
-        return current_inst
+        return current_inst, 0
 
     if current_status == "STOPPING":
         print_info(f"虚拟机 {instance_name} 正在关停，等待其完全停止...")
@@ -1009,32 +1120,53 @@ def ensure_instance_stopped(instance_client, project_id, zone, instance_name):
     )
     if stopped_inst is None:
         raise TimeoutError(f"等待虚拟机 {instance_name} 关停超时，最后状态: {last_status}")
-    return stopped_inst
+    return stopped_inst, max(0.0, time.time() - stop_start_time)
 
 
-def reroll_cpu_loop(project_id, instance_info, state_file=None):
+def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
     instance_name = instance_info.name
     zone = instance_info.zone
 
     instance_client = instances_client()
     attempt_counter = 1
-    stats = RerollStats(
-        project_id=project_id,
-        instance_name=instance_name,
-        zone=zone,
-        start_time=time.time(),
-    )
-    if state_file:
-        state_path = state_file
-    else:
-        state_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), STATE_DIR_NAME)
-        state_path = os.path.join(state_dir, DEFAULT_REROLL_STATE_FILE)
+    state_path = state_file or get_default_reroll_state_file()
+    stats = None
+
+    if resume:
+        existing_stats = load_reroll_stats_from_file(state_path)
+        if existing_stats and is_reroll_state_compatible(
+            existing_stats,
+            project_id=project_id,
+            instance_name=instance_name,
+            zone=zone,
+        ):
+            if existing_stats.success_cpu:
+                print_warning("检测到状态文件已记录命中结果，本次将忽略旧状态并重新开始。")
+            else:
+                stats = existing_stats
+                attempt_counter = stats.attempts + 1
+                print_info(f"检测到可恢复的状态文件，正在从第 {attempt_counter} 轮继续。")
+                print_reroll_state_snapshot(stats, state_path, title="已恢复上次刷 CPU 状态")
+        elif existing_stats:
+            print_warning("检测到旧状态文件，但目标项目或实例不一致，将忽略并重新开始。")
+
+    if stats is None:
+        stats = RerollStats(
+            project_id=project_id,
+            instance_name=instance_name,
+            zone=zone,
+            start_time=time.time(),
+        )
+        stats.last_updated = time.time()
+        save_json_state(state_path, stats.to_dict())
 
     print_info(f"目标实例: {instance_name} ({zone})")
     print_info("目标: 只要 CPU 包含 'AMD' 或 'EPYC' 即停止。")
 
     try:
         while True:
+            had_exception = False
+            stop_wait_seconds = 0
             stats.attempts += 1
             print("\n" + "=" * 50)
             print_info(f"第 {attempt_counter} 次尝试...")
@@ -1061,6 +1193,7 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None):
                 stats.last_error = None
                 stats.last_updated = time.time()
                 save_json_state(state_path, stats.to_dict())
+                print_reroll_progress(stats, state_path)
 
                 current_platform_upper = current_platform.upper()
                 if "AMD" in current_platform_upper or "EPYC" in current_platform_upper:
@@ -1073,28 +1206,35 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None):
 
                 print_warning(f"结果不满意 ({current_platform})。准备重置...")
                 print_info(f"正在关停虚拟机 {instance_name}...")
-                ensure_instance_stopped(instance_client, project_id, zone, instance_name)
+                _, stop_wait_seconds = ensure_instance_stopped(instance_client, project_id, zone, instance_name)
             except Exception as e:
+                had_exception = True
                 stats.exception_count += 1
                 stats.last_error = summarize_exception(e)
                 stats.last_updated = time.time()
                 remember_recent(stats.recent_errors, stats.last_error, limit=5)
                 save_json_state(state_path, stats.to_dict())
                 print_warning(f"本轮尝试遇到异常，将自动恢复后继续: {summarize_exception(e)}")
+                print_reroll_progress(stats, state_path)
 
             attempt_counter += 1
+            cooldown_base, cooldown_reason = get_reroll_cooldown_policy(
+                had_exception=had_exception,
+                stop_wait_seconds=stop_wait_seconds,
+            )
             cooldown = apply_jitter(
-                REROLL_LOOP_COOLDOWN,
+                cooldown_base,
                 jitter_ratio=COOLDOWN_JITTER_RATIO,
                 jitter_cap=COOLDOWN_JITTER_CAP,
             )
             print_info(
-                f"为降低 GCP API 抖动和频率限制影响，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
+                f"{cooldown_reason}，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
             )
             sleep_with_countdown(cooldown, "冷却中")
             print_info("冷却结束，开始下一轮尝试。")
     finally:
         print_reroll_summary(stats)
+        print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态文件摘要")
 
     try:
         return refresh_instance_info(project_id, instance_info, announce=False)
@@ -1854,7 +1994,12 @@ def handle_list_instances_cli(args):
 
 def handle_reroll_amd_cli(args):
     instance_info = get_cli_instance(args)
-    reroll_cpu_loop(args.project_id, instance_info, state_file=args.state_file)
+    reroll_cpu_loop(
+        args.project_id,
+        instance_info,
+        state_file=args.state_file,
+        resume=args.resume,
+    )
 
 
 def handle_firewall_cli(args):
@@ -1904,6 +2049,27 @@ def handle_doctor_cli(args):
     handle_doctor(getattr(args, "project_id", None))
 
 
+def handle_show_reroll_state_cli(args):
+    if not show_reroll_state(
+        state_file=args.state_file,
+        project_id=getattr(args, "project_id", None),
+        instance_info=(
+            InstanceInfo(
+                name=args.instance,
+                zone=args.zone,
+                status="UNKNOWN",
+                cpu_platform="Unknown CPU Platform",
+                network="global/networks/default",
+                internal_ip="-",
+                external_ip="-",
+            )
+            if getattr(args, "instance", None) and getattr(args, "zone", None)
+            else None
+        ),
+    ):
+        raise RuntimeError("未找到可显示的刷 CPU 状态。")
+
+
 def ensure_context_instance(context):
     if not context.current_instance:
         context.current_instance = select_instance(context.project_id)
@@ -1946,7 +2112,33 @@ def menu_select_instance_action(context):
 def menu_reroll_action(context):
     current_instance = ensure_context_instance(context)
     if current_instance:
-        context.current_instance = reroll_cpu_loop(context.project_id, current_instance)
+        default_state_path = get_default_reroll_state_file()
+        existing_stats = load_reroll_stats_from_file(default_state_path)
+        resume = bool(
+            existing_stats
+            and not existing_stats.success_cpu
+            and is_reroll_state_compatible(
+                existing_stats,
+                project_id=context.project_id,
+                instance_name=current_instance.name,
+                zone=current_instance.zone,
+            )
+        )
+        if resume:
+            print_info("检测到当前实例存在可恢复的刷 CPU 状态，将自动继续上次进度。")
+        context.current_instance = reroll_cpu_loop(
+            context.project_id,
+            current_instance,
+            state_file=default_state_path,
+            resume=resume,
+        )
+
+
+def menu_show_reroll_state_action(context):
+    show_reroll_state(
+        project_id=context.project_id,
+        instance_info=context.current_instance,
+    )
 
 
 def menu_firewall_action(context):
@@ -2034,6 +2226,7 @@ ACTION_SPECS = [
     ActionSpec("create", "新建免费实例", "create", "新建免费实例", "menu_create_action"),
     ActionSpec("select-instance", "选择服务器", None, "选择当前服务器", "menu_select_instance_action"),
     ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", "menu_reroll_action"),
+    ActionSpec("show-reroll-state", "查看刷 CPU 状态", "show-reroll-state", "显示当前刷 CPU 状态文件摘要", "menu_show_reroll_state_action"),
     ActionSpec("firewall", "配置防火墙规则", "firewall", "配置入站/出站规则", "menu_firewall_action"),
     ActionSpec("apt", "Debian换源", "run-script", "上传并执行 apt.sh", "menu_remote_apt_action"),
     ActionSpec("dae", "安装 dae", None, "上传并执行 dae.sh", "menu_remote_dae_action"),
@@ -2106,7 +2299,21 @@ def build_arg_parser():
         "--state-file",
         help="刷 CPU 状态文件路径，默认写入项目目录下的 .gcp_free_state/reroll_state.json",
     )
+    reroll_parser.add_argument("--resume", action="store_true", help="从已有状态文件恢复累计统计并继续执行")
     reroll_parser.set_defaults(handler=handle_reroll_amd_cli)
+
+    show_reroll_state_parser = subparsers.add_parser(
+        "show-reroll-state",
+        help=ACTION_SPEC_MAP["show-reroll-state"].description,
+    )
+    show_reroll_state_parser.add_argument(
+        "--state-file",
+        help="刷 CPU 状态文件路径，默认读取项目目录下的 .gcp_free_state/reroll_state.json",
+    )
+    show_reroll_state_parser.add_argument("--project-id", help="可选，校验状态文件中的项目")
+    show_reroll_state_parser.add_argument("--instance", help="可选，校验状态文件中的实例名称")
+    show_reroll_state_parser.add_argument("--zone", help="可选，校验状态文件中的实例可用区")
+    show_reroll_state_parser.set_defaults(handler=handle_show_reroll_state_cli)
 
     firewall_parser = subparsers.add_parser(
         "firewall",
@@ -2172,7 +2379,8 @@ def run_cli(args):
     if not handler:
         return False
     configure_runtime_logging(getattr(args, "log_file", None))
-    if handler is not handle_doctor_cli:
+    no_library_handlers = {handle_doctor_cli, handle_show_reroll_state_cli}
+    if handler not in no_library_handlers:
         ensure_google_cloud_libraries()
     handler(args)
     return True

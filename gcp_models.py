@@ -98,6 +98,24 @@ class RerollStats:
     last_error: Optional[str] = None
     last_updated: Optional[float] = None
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        return cls(
+            project_id=data["project_id"],
+            instance_name=data["instance_name"],
+            zone=data["zone"],
+            start_time=float(data.get("start_time") or 0),
+            attempts=int(data.get("attempts") or 0),
+            exception_count=int(data.get("exception_count") or 0),
+            cpu_counter=dict(data.get("cpu_counter") or {}),
+            recent_results=list(data.get("recent_results") or []),
+            recent_errors=list(data.get("recent_errors") or []),
+            success_cpu=data.get("success_cpu"),
+            last_cpu=data.get("last_cpu"),
+            last_error=data.get("last_error"),
+            last_updated=data.get("last_updated"),
+        )
+
     def to_dict(self):
         return {
             "project_id": self.project_id,

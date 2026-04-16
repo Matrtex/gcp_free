@@ -4,9 +4,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from gcp_config import LOCAL_SCRIPT_FILES, LOG_DIR_NAME, STATE_DIR_NAME
 from gcp_models import DoctorCheck
 
 GCLOUD_COMMAND_ENV = "GCP_FREE_GCLOUD_COMMAND"
+REQUIRED_GCP_SERVICES = (
+    "compute.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+)
+OPTIONAL_LOCAL_FILES = (
+    "config.dae",
+    "cdnip.txt",
+)
 
 
 def find_gcloud_command():
@@ -61,8 +70,82 @@ def get_active_gcloud_account(gcloud_path):
     return "", stderr or fallback_stderr or "无法确认 gcloud 登录状态"
 
 
+def get_current_gcloud_project(gcloud_path):
+    ok, stdout, stderr = _run_command([gcloud_path, "config", "get-value", "project"])
+    project_id = (stdout or "").strip()
+    if ok and project_id and project_id != "(unset)":
+        return project_id, ""
+    return "", stderr or "未设置默认项目"
+
+
+def is_directory_writable(path):
+    target_dir = Path(path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = target_dir / ".doctor_write_test"
+    try:
+        temp_file.write_text("ok", encoding="utf-8")
+        temp_file.unlink(missing_ok=True)
+        return True, f"目录可写: {target_dir}"
+    except OSError as exc:
+        return False, f"目录不可写: {target_dir} ({exc})"
+
+
+def collect_workspace_checks(workspace_dir):
+    checks = []
+    scripts_dir = workspace_dir / "scripts"
+    missing_scripts = [
+        script_name
+        for script_name in LOCAL_SCRIPT_FILES.values()
+        if not (scripts_dir / script_name).is_file()
+    ]
+    if missing_scripts:
+        checks.append(DoctorCheck("scripts", "FAIL", f"缺少脚本文件: {', '.join(missing_scripts)}"))
+    else:
+        checks.append(DoctorCheck("scripts", "PASS", f"脚本目录完整: {scripts_dir}"))
+
+    for file_name in OPTIONAL_LOCAL_FILES:
+        target = workspace_dir / file_name
+        if target.exists():
+            checks.append(DoctorCheck(file_name, "PASS", f"文件存在: {target}"))
+        else:
+            checks.append(DoctorCheck(file_name, "WARN", f"文件不存在，相关功能执行前需自行准备: {target}"))
+
+    for dir_name, check_name in ((LOG_DIR_NAME, "log-dir"), (STATE_DIR_NAME, "state-dir")):
+        ok, message = is_directory_writable(workspace_dir / dir_name)
+        checks.append(DoctorCheck(check_name, "PASS" if ok else "FAIL", message))
+
+    return checks
+
+
+def get_enabled_gcp_services(gcloud_path, project_id):
+    enabled_services = set()
+    errors = []
+    for service_name in REQUIRED_GCP_SERVICES:
+        ok, stdout, stderr = _run_command(
+            [
+                gcloud_path,
+                "services",
+                "list",
+                "--enabled",
+                "--project",
+                project_id,
+                "--filter",
+                f"config.name={service_name}",
+                "--format=value(config.name)",
+            ],
+            timeout=60,
+        )
+        if ok:
+            if stdout.strip():
+                enabled_services.add(service_name)
+        else:
+            errors.append(stderr or f"检查服务 {service_name} 失败")
+    return enabled_services, errors
+
+
 def run_doctor(requirements_file, project_id=None):
     requirements_path = Path(requirements_file)
+    workspace_dir = requirements_path.parent
     checks = []
 
     gcloud_path = find_gcloud_command()
@@ -77,6 +160,7 @@ def run_doctor(requirements_file, project_id=None):
     else:
         checks.append(DoctorCheck("python", "FAIL", "未找到 Python 命令"))
 
+    current_project = ""
     if gcloud_path:
         account, auth_error = get_active_gcloud_account(gcloud_path)
         if account:
@@ -90,12 +174,43 @@ def run_doctor(requirements_file, project_id=None):
         else:
             checks.append(DoctorCheck("adc", "WARN", stderr or "ADC 未配置"))
 
-        if project_id:
-            ok, stdout, stderr = _run_command([gcloud_path, "config", "get-value", "project"])
-            if ok and stdout and stdout != "(unset)":
-                checks.append(DoctorCheck("project", "PASS", f"当前默认项目: {stdout}"))
+        current_project, project_error = get_current_gcloud_project(gcloud_path)
+        if current_project:
+            if project_id and project_id != current_project:
+                checks.append(
+                    DoctorCheck(
+                        "project",
+                        "WARN",
+                        f"当前默认项目为 {current_project}，与目标项目 {project_id} 不一致",
+                    )
+                )
             else:
-                checks.append(DoctorCheck("project", "WARN", stderr or "未设置默认项目"))
+                checks.append(DoctorCheck("project", "PASS", f"当前默认项目: {current_project}"))
+        else:
+            checks.append(DoctorCheck("project", "WARN", project_error or "未设置默认项目"))
+
+        effective_project = project_id or current_project
+        if effective_project:
+            enabled_services, service_errors = get_enabled_gcp_services(gcloud_path, effective_project)
+            for service_name in REQUIRED_GCP_SERVICES:
+                if service_name in enabled_services:
+                    checks.append(DoctorCheck(service_name, "PASS", f"项目 {effective_project} 已启用 {service_name}"))
+                elif service_errors:
+                    checks.append(
+                        DoctorCheck(
+                            service_name,
+                            "WARN",
+                            f"无法确认项目 {effective_project} 的服务状态: {' | '.join(service_errors)}",
+                        )
+                    )
+                else:
+                    checks.append(
+                        DoctorCheck(
+                            service_name,
+                            "FAIL",
+                            f"项目 {effective_project} 未启用 {service_name}",
+                        )
+                    )
 
     for command_name in ("ssh", "scp"):
         command_path = shutil.which(command_name)
@@ -108,5 +223,7 @@ def run_doctor(requirements_file, project_id=None):
         checks.append(DoctorCheck("requirements", "PASS", f"依赖文件存在: {requirements_path}"))
     else:
         checks.append(DoctorCheck("requirements", "WARN", f"依赖文件不存在: {requirements_path}"))
+
+    checks.extend(collect_workspace_checks(workspace_dir))
 
     return checks
