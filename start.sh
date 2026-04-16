@@ -6,6 +6,29 @@ cd "$SCRIPT_DIR"
 
 VENV_DIR="${SCRIPT_DIR}/.venv"
 INIT_MARKER="${SCRIPT_DIR}/.gcp_free_initialized"
+REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
+DEPS_HASH_FILE="${SCRIPT_DIR}/.deps.sha256"
+
+get_requirements_hash() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$REQUIREMENTS_FILE" | awk '{print $1}'
+    return
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$REQUIREMENTS_FILE" | awk '{print $1}'
+    return
+  fi
+
+  python3 - "$REQUIREMENTS_FILE" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+}
 
 if [[ ! -f "$INIT_MARKER" ]]; then
   if ! command -v gcloud >/dev/null 2>&1; then
@@ -37,7 +60,6 @@ if [[ ! -f "$INIT_MARKER" ]]; then
 
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
-  python -m pip install google-cloud-compute google-cloud-resource-manager
 
   touch "$INIT_MARKER"
 else
@@ -48,6 +70,27 @@ else
   fi
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
+fi
+
+export GCP_FREE_GCLOUD_COMMAND="$(command -v gcloud)"
+
+if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
+  echo "[错误] 未找到依赖文件：$REQUIREMENTS_FILE" >&2
+  exit 1
+fi
+
+CURRENT_DEPS_HASH="$(get_requirements_hash)"
+INSTALLED_DEPS_HASH=""
+if [[ -f "$DEPS_HASH_FILE" ]]; then
+  INSTALLED_DEPS_HASH="$(cat "$DEPS_HASH_FILE")"
+fi
+
+if [[ "$CURRENT_DEPS_HASH" != "$INSTALLED_DEPS_HASH" ]]; then
+  echo "[初始化] 检测到依赖变更，正在安装 requirements.txt ..."
+  python -m pip install -r "$REQUIREMENTS_FILE"
+  printf '%s' "$CURRENT_DEPS_HASH" > "$DEPS_HASH_FILE"
+else
+  echo "[初始化] Python 依赖已是最新。"
 fi
 
 exec python gcp.py

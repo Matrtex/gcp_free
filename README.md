@@ -56,6 +56,7 @@ gcloud auth application-default login
 ```powershell
 .\start.ps1 list-instances --project-id <你的项目ID>
 .\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
+.\start.ps1 doctor --project-id <你的项目ID>
 ```
 
 ### Linux / WSL / Git Bash 运行脚本
@@ -70,10 +71,10 @@ bash start.sh
 
 1. 启用所需 GCP API
 2. 创建并进入 venv
-3. 安装依赖
+3. 按 `requirements.txt` 安装依赖
 4. 执行 `gcp.py`
 
-再次运行只会进入 venv 并执行 `gcp.py`。
+再次运行会比较 `requirements.txt` 的哈希，只有依赖变更时才重新安装。
 
 ## 手动运行
 
@@ -95,9 +96,41 @@ pip install google-cloud-compute google-cloud-resource-manager
 python gcp.py
 ```
 
+## 常用命令
+
+环境预检：
+
+```powershell
+.\start.ps1 doctor --project-id <你的项目ID>
+```
+
+非交互远程 dry-run：
+
+```powershell
+.\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> --dry-run apt
+```
+
+日志文件默认写入：
+
+```text
+.gcp_free_logs/gcp_free.log
+```
+
+刷 CPU 状态文件默认写入：
+
+```text
+.gcp_free_state/reroll_state.json
+```
+
 ## 脚本说明
 
 - `gcp.py`: 主控制脚本
+- `gcp_config.py`: 配置常量
+- `gcp_clients.py`: GCP client 工厂
+- `gcp_models.py`: 数据模型
+- `gcp_logging.py`: 日志写入
+- `gcp_state.py`: JSON 状态持久化
+- `gcp_doctor.py`: 环境预检
 - `start.ps1`: Windows PowerShell 启动脚本
 - `config.dae`: dae 配置模板
 - `scripts/apt.sh`: 换源脚本
