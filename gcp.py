@@ -1,5 +1,6 @@
 import getpass
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import traceback
 try:
     from google.cloud import compute_v1
     from google.cloud import resourcemanager_v3
+    from google.api_core import exceptions as google_exceptions
 except ImportError:
     print("【错误】缺少必要的 Python 库。")
     print("请先在终端运行以下命令安装：")
@@ -41,6 +43,21 @@ OS_IMAGE_OPTIONS = [
     {"name": "Ubuntu 22.04 LTS", "project": "ubuntu-os-cloud", "family": "ubuntu-2204-lts"},
 ]
 
+OPERATION_WAIT_TIMEOUT = 300
+OPERATION_POLL_INTERVAL = 3
+INSTANCE_API_MAX_RETRIES = 4
+INSTANCE_API_RETRY_BASE_DELAY = 5
+INSTANCE_CONFLICT_RETRY_DELAY = 10
+INSTANCE_STATUS_WAIT_TIMEOUT = 180
+INSTANCE_STATUS_POLL_INTERVAL = 3
+CPU_PLATFORM_WAIT_TIMEOUT = 120
+CPU_PLATFORM_POLL_INTERVAL = 2
+REROLL_LOOP_COOLDOWN = 15
+RETRY_JITTER_RATIO = 0.2
+RETRY_JITTER_CAP = 3
+COOLDOWN_JITTER_RATIO = 0.15
+COOLDOWN_JITTER_CAP = 4
+
 
 def print_info(msg):
     print(f"[信息] {msg}")
@@ -55,6 +72,21 @@ def print_success(msg):
 def print_warning(msg):
     print(f"\033[93m[警告] {msg}\033[0m")
     sys.stdout.flush()
+
+
+def format_seconds(seconds):
+    rounded = round(seconds, 1)
+    if rounded.is_integer():
+        return str(int(rounded))
+    return f"{rounded:.1f}"
+
+
+def apply_jitter(base_delay, jitter_ratio=RETRY_JITTER_RATIO, jitter_cap=RETRY_JITTER_CAP):
+    if base_delay <= 0:
+        return 0
+
+    jitter_span = min(base_delay * jitter_ratio, jitter_cap)
+    return base_delay + random.uniform(0, jitter_span)
 
 
 def select_from_list(items, prompt_text, label_fn):
@@ -83,7 +115,7 @@ def select_gcp_project():
     try:
         client = resourcemanager_v3.ProjectsClient()
         request = resourcemanager_v3.SearchProjectsRequest(query="")
-        page_result = client.search_projects(request=request)
+        page_result = search_projects_with_retry(client, request)
 
         active_projects = []
         for project in page_result:
@@ -115,7 +147,7 @@ def select_gcp_project():
 def list_zones_for_region(project_id, region):
     zones_client = compute_v1.ZonesClient()
     zones = []
-    for zone in zones_client.list(project=project_id):
+    for zone in list_zones_with_retry(zones_client, project_id):
         if zone.status != "UP":
             continue
         zone_region = zone.region.split("/")[-1] if zone.region else ""
@@ -156,9 +188,10 @@ def create_instance(project_id, zone, os_config, instance_name="free-tier-vm"):
     print(f"系统: {os_config['name']}")
 
     try:
-        image_response = images_client.get_from_family(
-            project=os_config["project"],
-            family=os_config["family"],
+        image_response = get_image_from_family_with_retry(
+            images_client,
+            os_config["project"],
+            os_config["family"],
         )
         source_disk_image = image_response.self_link
 
@@ -191,26 +224,17 @@ def create_instance(project_id, zone, os_config, instance_name="free-tier-vm"):
         instance.tags = tags
 
         print("配置组装完成，正在向 Google Cloud 发送创建请求...")
-        operation = instance_client.insert(
-            project=project_id,
-            zone=zone,
-            instance_resource=instance,
-        )
+        operation = insert_instance_with_retry(instance_client, project_id, zone, instance)
 
         print("请求已发送，正在等待操作完成... (约 30-60 秒)")
-        operation_client = compute_v1.ZoneOperationsClient()
-        operation = operation_client.wait(
-            project=project_id,
-            zone=zone,
-            operation=operation.name,
-        )
+        operation = wait_for_operation(project_id, zone, operation.name, f"创建实例 {instance_name}")
 
         if operation.error:
             print("创建失败:", operation.error)
         else:
             print_success(f"实例 '{instance_name}' 已创建！")
             try:
-                inst_info = instance_client.get(project=project_id, zone=zone, instance=instance_name)
+                inst_info = get_instance_with_retry(instance_client, project_id, zone, instance_name)
                 ip = inst_info.network_interfaces[0].access_configs[0].nat_i_p
                 print(f"外部 IP 地址: {ip}")
             except Exception:
@@ -229,7 +253,7 @@ def list_instances(project_id):
     print_info(f"正在扫描项目 {project_id} 中的实例...")
 
     instances = []
-    for zone_path, response in instance_client.aggregated_list(request=request):
+    for zone_path, response in aggregated_list_instances_with_retry(instance_client, request, project_id):
         if not response.instances:
             continue
         zone_short = zone_path.split("/")[-1]
@@ -282,9 +306,385 @@ def select_instance(project_id):
         print("输入无效，请重试。")
 
 
-def wait_for_operation(project_id, zone, operation_name):
+def summarize_exception(exc, max_length=160):
+    message = " ".join(str(exc).split())
+    if len(message) <= max_length:
+        return message
+    return message[: max_length - 3] + "..."
+
+
+def is_transient_gcp_error(exc):
+    transient_error_types = (
+        google_exceptions.BadGateway,
+        google_exceptions.GatewayTimeout,
+        google_exceptions.ServiceUnavailable,
+        google_exceptions.TooManyRequests,
+    )
+    if isinstance(exc, transient_error_types):
+        return True
+
+    message = str(exc).lower()
+    transient_markers = [" 429 ", " 502 ", " 503 ", " 504 ", "try again in 30 seconds"]
+    return any(marker in message for marker in transient_markers)
+
+
+def is_operation_in_progress_error(exc):
+    if isinstance(exc, google_exceptions.Conflict):
+        return True
+
+    message = str(exc).lower()
+    conflict_markers = [
+        " 409 ",
+        "already in progress",
+        "already being used by an operation",
+        "operation is already in progress",
+        "operationinprogress",
+        "resource not ready",
+        "resource_not_ready",
+        "resourceinusebyanotherresource",
+    ]
+    return any(marker in message for marker in conflict_markers)
+
+
+def extract_operation_error(operation):
+    operation_error = getattr(operation, "error", None)
+    if operation_error and getattr(operation_error, "errors", None):
+        error_messages = []
+        for item in operation_error.errors:
+            code = getattr(item, "code", "") or "UNKNOWN"
+            message = getattr(item, "message", "") or "未知错误"
+            error_messages.append(f"{code}: {message}")
+        if error_messages:
+            return "; ".join(error_messages)
+
+    http_status = getattr(operation, "http_error_status_code", None)
+    http_message = getattr(operation, "http_error_message", None)
+    if http_status or http_message:
+        return f"{http_status or ''} {http_message or ''}".strip()
+
+    return ""
+
+
+def ensure_operation_success(operation, operation_desc):
+    error_message = extract_operation_error(operation)
+    if error_message:
+        raise RuntimeError(f"{operation_desc}失败: {error_message}")
+
+
+def wait_for_operation_result(
+    operation_client,
+    operation_desc,
+    timeout=OPERATION_WAIT_TIMEOUT,
+    poll_interval=OPERATION_POLL_INTERVAL,
+    **kwargs,
+):
+    deadline = time.time() + timeout
+    last_error = None
+
+    try:
+        operation = operation_client.wait(**kwargs)
+        ensure_operation_success(operation, operation_desc)
+        return operation
+    except Exception as exc:
+        if not is_transient_gcp_error(exc):
+            raise
+        last_error = exc
+        print_warning(
+            f"{operation_desc} 的 wait 接口暂时不可用，改用轮询继续等待: {summarize_exception(exc)}"
+        )
+
+    while time.time() < deadline:
+        try:
+            operation = operation_client.get(**kwargs)
+        except Exception as exc:
+            if not is_transient_gcp_error(exc):
+                raise
+            last_error = exc
+            sleep_time = apply_jitter(poll_interval)
+            print_warning(
+                f"{operation_desc} 轮询状态时遇到临时错误，约 {format_seconds(sleep_time)} 秒后重试: "
+                f"{summarize_exception(exc)}"
+            )
+            time.sleep(sleep_time)
+            continue
+
+        if getattr(operation, "status", None) == "DONE":
+            ensure_operation_success(operation, operation_desc)
+            return operation
+
+        time.sleep(poll_interval)
+
+    if last_error:
+        raise TimeoutError(f"{operation_desc}等待超时，最后一次错误: {summarize_exception(last_error)}") from last_error
+    raise TimeoutError(f"{operation_desc}等待超时。")
+
+
+def wait_for_operation(project_id, zone, operation_name, operation_desc="区域操作"):
     operation_client = compute_v1.ZoneOperationsClient()
-    return operation_client.wait(project=project_id, zone=zone, operation=operation_name)
+    return wait_for_operation_result(
+        operation_client,
+        operation_desc,
+        project=project_id,
+        zone=zone,
+        operation=operation_name,
+    )
+
+
+def wait_for_global_operation(project_id, operation_name, operation_desc="全局操作"):
+    operation_client = compute_v1.GlobalOperationsClient()
+    return wait_for_operation_result(
+        operation_client,
+        operation_desc,
+        project=project_id,
+        operation=operation_name,
+    )
+
+
+def call_with_retries(
+    action_desc,
+    func,
+    max_retries=INSTANCE_API_MAX_RETRIES,
+    base_delay=INSTANCE_API_RETRY_BASE_DELAY,
+):
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as exc:
+            if not is_transient_gcp_error(exc) and not is_operation_in_progress_error(exc):
+                raise
+
+            last_error = exc
+            current_try = attempt + 1
+            if current_try >= max_retries:
+                break
+
+            if is_operation_in_progress_error(exc):
+                sleep_time = apply_jitter(INSTANCE_CONFLICT_RETRY_DELAY)
+                print_warning(
+                    f"{action_desc} 遇到资源冲突，可能已有操作正在进行，准备重试 "
+                    f"({current_try}/{max_retries}): {summarize_exception(exc)}"
+                )
+            else:
+                sleep_time = apply_jitter(base_delay * current_try)
+                print_warning(
+                    f"{action_desc} 遇到临时错误，准备重试 ({current_try}/{max_retries}): "
+                    f"{summarize_exception(exc)}"
+                )
+            print_info(f"等待约 {format_seconds(sleep_time)} 秒后继续 {action_desc}...")
+            time.sleep(sleep_time)
+
+    raise RuntimeError(
+        f"{action_desc} 在 {max_retries} 次尝试后仍失败: {summarize_exception(last_error)}"
+    ) from last_error
+
+
+def get_instance_with_retry(instance_client, project_id, zone, instance_name):
+    return call_with_retries(
+        f"获取实例 {instance_name} 状态",
+        lambda: instance_client.get(project=project_id, zone=zone, instance=instance_name),
+    )
+
+
+def start_instance_with_retry(instance_client, project_id, zone, instance_name):
+    return call_with_retries(
+        f"启动虚拟机 {instance_name}",
+        lambda: instance_client.start(project=project_id, zone=zone, instance=instance_name),
+    )
+
+
+def stop_instance_with_retry(instance_client, project_id, zone, instance_name):
+    return call_with_retries(
+        f"关停虚拟机 {instance_name}",
+        lambda: instance_client.stop(project=project_id, zone=zone, instance=instance_name),
+    )
+
+
+def insert_instance_with_retry(instance_client, project_id, zone, instance_resource):
+    instance_name = getattr(instance_resource, "name", "未命名实例")
+    return call_with_retries(
+        f"创建实例 {instance_name}",
+        lambda: instance_client.insert(
+            project=project_id,
+            zone=zone,
+            instance_resource=instance_resource,
+        ),
+    )
+
+
+def delete_instance_with_retry(instance_client, project_id, zone, instance_name):
+    return call_with_retries(
+        f"删除实例 {instance_name}",
+        lambda: instance_client.delete(project=project_id, zone=zone, instance=instance_name),
+    )
+
+
+def get_image_from_family_with_retry(images_client, project, family):
+    return call_with_retries(
+        f"获取镜像族 {project}/{family}",
+        lambda: images_client.get_from_family(project=project, family=family),
+    )
+
+
+def insert_firewall_with_retry(firewall_client, project_id, firewall_rule):
+    rule_name = getattr(firewall_rule, "name", "未命名规则")
+    return call_with_retries(
+        f"创建防火墙规则 {rule_name}",
+        lambda: firewall_client.insert(project=project_id, firewall_resource=firewall_rule),
+    )
+
+
+def delete_firewall_with_retry(firewall_client, project_id, rule_name):
+    return call_with_retries(
+        f"删除防火墙规则 {rule_name}",
+        lambda: firewall_client.delete(project=project_id, firewall=rule_name),
+    )
+
+
+def delete_disk_with_retry(disk_client, project_id, zone, disk_name):
+    return call_with_retries(
+        f"删除磁盘 {disk_name}",
+        lambda: disk_client.delete(project=project_id, zone=zone, disk=disk_name),
+    )
+
+
+def search_projects_with_retry(projects_client, request):
+    return call_with_retries(
+        "扫描 GCP 项目列表",
+        lambda: list(projects_client.search_projects(request=request)),
+    )
+
+
+def list_zones_with_retry(zones_client, project_id):
+    return call_with_retries(
+        f"获取项目 {project_id} 的可用区列表",
+        lambda: list(zones_client.list(project=project_id)),
+    )
+
+
+def aggregated_list_instances_with_retry(instance_client, request, project_id):
+    return call_with_retries(
+        f"扫描项目 {project_id} 的实例列表",
+        lambda: list(instance_client.aggregated_list(request=request)),
+    )
+
+
+def wait_for_instance_status(
+    instance_client,
+    project_id,
+    zone,
+    instance_name,
+    expected_statuses,
+    timeout=INSTANCE_STATUS_WAIT_TIMEOUT,
+    poll_interval=INSTANCE_STATUS_POLL_INTERVAL,
+):
+    if isinstance(expected_statuses, str):
+        expected_statuses = {expected_statuses}
+    else:
+        expected_statuses = set(expected_statuses)
+
+    deadline = time.time() + timeout
+    last_status = None
+    target_text = "/".join(sorted(expected_statuses))
+
+    while time.time() < deadline:
+        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        current_status = current_inst.status or "UNKNOWN"
+        if current_status in expected_statuses:
+            return current_inst, current_status
+
+        if current_status != last_status:
+            print_info(f"实例当前状态: {current_status}，继续等待进入 {target_text}...")
+            last_status = current_status
+
+        time.sleep(poll_interval)
+
+    return None, last_status or "UNKNOWN"
+
+
+def ensure_instance_running(instance_client, project_id, zone, instance_name):
+    current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+    current_status = current_inst.status or "UNKNOWN"
+
+    if current_status == "STOPPING":
+        print_info(f"虚拟机 {instance_name} 当前正在关停，先等待完全停止...")
+        stopped_inst, last_status = wait_for_instance_status(
+            instance_client, project_id, zone, instance_name, {"TERMINATED", "STOPPED"}
+        )
+        if stopped_inst is None:
+            raise TimeoutError(f"等待虚拟机 {instance_name} 关停超时，最后状态: {last_status}")
+        current_status = last_status
+
+    if current_status in {"TERMINATED", "STOPPED"}:
+        print_info(f"正在启动虚拟机 {instance_name}...")
+        operation = start_instance_with_retry(instance_client, project_id, zone, instance_name)
+        wait_for_operation(project_id, zone, operation.name, f"启动虚拟机 {instance_name}")
+        print_info("虚拟机已通电，正在等待系统初始化...")
+    elif current_status != "RUNNING":
+        print_info(f"虚拟机当前状态为 {current_status}，等待其进入 RUNNING...")
+
+    running_inst, last_status = wait_for_instance_status(
+        instance_client, project_id, zone, instance_name, "RUNNING"
+    )
+    if running_inst is None:
+        raise TimeoutError(f"等待虚拟机 {instance_name} 启动超时，最后状态: {last_status}")
+    return running_inst
+
+
+def wait_for_cpu_platform(
+    instance_client,
+    project_id,
+    zone,
+    instance_name,
+    timeout=CPU_PLATFORM_WAIT_TIMEOUT,
+    poll_interval=CPU_PLATFORM_POLL_INTERVAL,
+):
+    deadline = time.time() + timeout
+    attempt_counter = 0
+    last_status = "UNKNOWN"
+
+    while time.time() < deadline:
+        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        last_status = current_inst.status or "UNKNOWN"
+
+        if last_status == "RUNNING":
+            current_platform = current_inst.cpu_platform
+            if current_platform and current_platform != "Unknown CPU Platform":
+                return current_platform, last_status
+
+        attempt_counter += 1
+        if attempt_counter % 5 == 0:
+            if last_status == "RUNNING":
+                print_info(f"正在等待 CPU 元数据同步... ({attempt_counter} 次轮询)")
+            else:
+                print_warning(f"实例状态暂未稳定为 RUNNING: {last_status}，继续等待 CPU 信息同步。")
+
+        time.sleep(poll_interval)
+
+    return None, last_status
+
+
+def ensure_instance_stopped(instance_client, project_id, zone, instance_name):
+    current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+    current_status = current_inst.status or "UNKNOWN"
+
+    if current_status in {"TERMINATED", "STOPPED"}:
+        print_info(f"虚拟机 {instance_name} 已处于关机状态，跳过关停请求。")
+        return current_inst
+
+    if current_status == "STOPPING":
+        print_info(f"虚拟机 {instance_name} 正在关停，等待其完全停止...")
+    else:
+        operation = stop_instance_with_retry(instance_client, project_id, zone, instance_name)
+        wait_for_operation(project_id, zone, operation.name, f"关停虚拟机 {instance_name}")
+
+    stopped_inst, last_status = wait_for_instance_status(
+        instance_client, project_id, zone, instance_name, {"TERMINATED", "STOPPED"}
+    )
+    if stopped_inst is None:
+        raise TimeoutError(f"等待虚拟机 {instance_name} 关停超时，最后状态: {last_status}")
+    return stopped_inst
 
 
 def reroll_cpu_loop(project_id, instance_info):
@@ -301,48 +701,42 @@ def reroll_cpu_loop(project_id, instance_info):
         print("\n" + "=" * 50)
         print_info(f"第 {attempt_counter} 次尝试...")
 
-        current_inst = instance_client.get(project=project_id, zone=zone, instance=instance_name)
-        if current_inst.status != "RUNNING":
-            print_info(f"正在启动虚拟机 {instance_name}...")
-            op = instance_client.start(project=project_id, zone=zone, instance=instance_name)
-            wait_for_operation(project_id, zone, op.name)
-            print_info("虚拟机已通电，正在等待系统初始化...")
+        try:
+            ensure_instance_running(instance_client, project_id, zone, instance_name)
+            current_platform, current_status = wait_for_cpu_platform(
+                instance_client, project_id, zone, instance_name
+            )
 
-        current_platform = "Unknown CPU Platform"
-        max_retries = 60
+            if current_platform is None:
+                if current_status == "RUNNING":
+                    current_platform = "CPU 信息同步超时"
+                else:
+                    current_platform = f"实例未稳定运行（当前状态: {current_status}）"
+                print_warning(f"本轮未拿到有效 CPU 信息：{current_platform}")
+            else:
+                print_info(f"检测到 CPU: {current_platform}")
 
-        for i in range(max_retries):
-            current_inst = instance_client.get(project=project_id, zone=zone, instance=instance_name)
-
-            if current_inst.status != "RUNNING":
-                print_warning(f"检测到虚拟机状态异常变为: {current_inst.status}。跳过本次检测。")
-                current_platform = "Instability Detected"
+            if "AMD" in str(current_platform).upper():
+                print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
+                print_info("脚本执行完毕。")
                 break
 
-            current_platform = current_inst.cpu_platform
-            if current_platform and current_platform != "Unknown CPU Platform":
-                break
+            print_warning(f"结果不满意 ({current_platform})。准备重置...")
+            print_info(f"正在关停虚拟机 {instance_name}...")
+            ensure_instance_stopped(instance_client, project_id, zone, instance_name)
+        except Exception as e:
+            print_warning(f"本轮尝试遇到异常，将自动恢复后继续: {summarize_exception(e)}")
 
-            if (i + 1) % 5 == 0:
-                print_info(f"正在等待 CPU 元数据同步... ({i+1}/{max_retries}) - 机器正在启动中")
-            time.sleep(2)
-
-        if current_platform == "Unknown CPU Platform":
-            print_warning("超时：等待 2 分钟后仍无法获取 CPU 信息。")
-        else:
-            print_info(f"检测到 CPU: {current_platform}")
-
-        if "AMD" in str(current_platform).upper():
-            print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
-            print_info("脚本执行完毕。")
-            break
-
-        print_warning(f"结果不满意 ({current_platform})。准备重置...")
-        print_info(f"正在关停虚拟机 {instance_name}...")
-        op = instance_client.stop(project=project_id, zone=zone, instance=instance_name)
-        wait_for_operation(project_id, zone, op.name)
         attempt_counter += 1
-        time.sleep(2)
+        cooldown = apply_jitter(
+            REROLL_LOOP_COOLDOWN,
+            jitter_ratio=COOLDOWN_JITTER_RATIO,
+            jitter_cap=COOLDOWN_JITTER_CAP,
+        )
+        print_info(
+            f"为降低 GCP API 抖动和频率限制影响，正在冷却约 {format_seconds(cooldown)} 秒后继续..."
+        )
+        time.sleep(cooldown)
 
 
 def read_cdn_ips(filename="cdnip.txt"):
@@ -393,10 +787,9 @@ def add_allow_all_ingress(project_id, network):
     firewall_rule.allowed = [allow_config]
 
     try:
-        operation = firewall_client.insert(project=project_id, firewall_resource=firewall_rule)
+        operation = insert_firewall_with_retry(firewall_client, project_id, firewall_rule)
         print("正在应用规则...")
-        operation_client = compute_v1.GlobalOperationsClient()
-        operation_client.wait(project=project_id, operation=operation.name)
+        wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success("已添加允许所有入站连接的规则。")
     except Exception as e:
         if "already exists" in str(e):
@@ -428,10 +821,9 @@ def add_deny_cdn_egress(project_id, ip_ranges, network):
     firewall_rule.denied = [deny_config]
 
     try:
-        operation = firewall_client.insert(project=project_id, firewall_resource=firewall_rule)
+        operation = insert_firewall_with_retry(firewall_client, project_id, firewall_rule)
         print("正在应用规则...")
-        operation_client = compute_v1.GlobalOperationsClient()
-        operation_client.wait(project=project_id, operation=operation.name)
+        wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success(f"已添加拒绝规则，共拦截 {len(ip_ranges)} 个 IP 段。")
     except Exception as e:
         if "already exists" in str(e):
@@ -477,9 +869,8 @@ def is_not_found_error(exc):
 def delete_firewall_rule(project_id, rule_name):
     firewall_client = compute_v1.FirewallsClient()
     try:
-        operation = firewall_client.delete(project=project_id, firewall=rule_name)
-        operation_client = compute_v1.GlobalOperationsClient()
-        operation_client.wait(project=project_id, operation=operation.name)
+        operation = delete_firewall_with_retry(firewall_client, project_id, rule_name)
+        wait_for_global_operation(project_id, operation.name, f"删除防火墙规则 {rule_name}")
         print_success(f"已删除防火墙规则: {rule_name}")
         return True
     except Exception as e:
@@ -497,7 +888,7 @@ def delete_disks_if_needed(project_id, zone, disk_names):
     all_ok = True
     for disk_name in disk_names:
         try:
-            operation = disk_client.delete(project=project_id, zone=zone, disk=disk_name)
+            operation = delete_disk_with_retry(disk_client, project_id, zone, disk_name)
             wait_for_operation(project_id, zone, operation.name)
             print_success(f"已删除磁盘: {disk_name}")
         except Exception as e:
@@ -526,7 +917,7 @@ def delete_free_resources(project_id, instance_info):
     instance_client = compute_v1.InstancesClient()
     disk_names = []
     try:
-        inst = instance_client.get(project=project_id, zone=zone, instance=instance_name)
+        inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
         for disk in inst.disks:
             if disk.source:
                 disk_names.append(disk.source.split("/")[-1])
@@ -535,7 +926,7 @@ def delete_free_resources(project_id, instance_info):
 
     print_info("正在删除实例...")
     try:
-        operation = instance_client.delete(project=project_id, zone=zone, instance=instance_name)
+        operation = delete_instance_with_retry(instance_client, project_id, zone, instance_name)
         wait_for_operation(project_id, zone, operation.name)
         print_success("实例已删除。")
     except Exception as e:
