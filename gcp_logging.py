@@ -53,12 +53,30 @@ class AppLogger:
 
         return True
 
+    def _write_console(self, text):
+        stream = sys.stdout
+        line = f"{text}\n"
+        try:
+            stream.write(line)
+        except UnicodeEncodeError:
+            encoding = getattr(stream, "encoding", None) or "utf-8"
+            if hasattr(stream, "buffer"):
+                stream.buffer.write(line.encode(encoding, errors="backslashreplace"))
+            else:
+                safe_line = line.encode(encoding, errors="backslashreplace").decode(
+                    encoding,
+                    errors="ignore",
+                )
+                stream.write(safe_line)
+        if hasattr(stream, "flush"):
+            stream.flush()
+
     def _emit(self, level, prefix, message, color=None):
         text = f"{prefix} {message}"
         if color and self._should_use_color():
-            print(f"{color}{text}\033[0m")
+            self._write_console(f"{color}{text}\033[0m")
         else:
-            print(text)
+            self._write_console(text)
         self._write_file(level, message)
 
     def info(self, message):

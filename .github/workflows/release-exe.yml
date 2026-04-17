@@ -26,6 +26,7 @@ on:
       - "v*"
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -37,6 +38,78 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: 等待自动检查通过
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const targetSha = context.sha;
+            const defaultBranch = context.payload.repository?.default_branch || 'master';
+            const maxAttempts = 30;
+            const delayMs = 20000;
+
+            if (context.eventName === 'workflow_dispatch' && context.ref.replace('refs/heads/', '') !== defaultBranch) {
+              core.setFailed(`手动发布只允许从默认分支 ${defaultBranch} 触发，当前为 ${context.ref}。`);
+              return;
+            }
+
+            function summarizeRun(run) {
+              return `#${run.run_number} ${run.status}/${run.conclusion || 'pending'} ${run.head_branch} ${run.html_url}`;
+            }
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: 'ci.yml',
+                head_sha: targetSha,
+                per_page: 20,
+              });
+
+              const runs = response.data.workflow_runs
+                .filter((run) => run.head_branch === defaultBranch);
+
+              const successfulRun = runs.find(
+                (run) => run.status === 'completed' && run.conclusion === 'success'
+              );
+              if (successfulRun) {
+                core.info(`检测到当前提交的自动检查已通过：${summarizeRun(successfulRun)}`);
+                return;
+              }
+
+              const inProgressRuns = runs.filter((run) => run.status !== 'completed');
+              const failedRuns = runs.filter(
+                (run) => run.status === 'completed' && run.conclusion && run.conclusion !== 'success'
+              );
+
+              if (attempt === maxAttempts) {
+                const details = runs.length
+                  ? runs.map(summarizeRun).join('\n')
+                  : '未找到当前提交在默认分支上的自动检查记录。';
+                core.setFailed(
+                  `发布前校验失败：当前提交 ${targetSha} 对应的“自动检查”尚未在 ${defaultBranch} 上成功。\n${details}`
+                );
+                return;
+              }
+
+              if (inProgressRuns.length > 0) {
+                core.info(
+                  `第 ${attempt}/${maxAttempts} 次检查：自动检查仍在运行，等待 ${(delayMs / 1000).toFixed(0)} 秒后继续。`
+                );
+              } else if (failedRuns.length > 0) {
+                core.info(
+                  `第 ${attempt}/${maxAttempts} 次检查：发现失败的自动检查，但尚未看到成功结果，等待 ${(delayMs / 1000).toFixed(0)} 秒后继续。`
+                );
+              } else {
+                core.info(
+                  `第 ${attempt}/${maxAttempts} 次检查：尚未发现当前提交在 ${defaultBranch} 上的自动检查记录，等待 ${(delayMs / 1000).toFixed(0)} 秒后继续。`
+                );
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
 
       - name: 安装 Python
         uses: actions/setup-python@v5

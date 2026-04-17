@@ -72,8 +72,13 @@ if (-not $GcloudCommand) {
     Write-ErrorMessage "gcloud was not found. Please install Google Cloud SDK first."
     exit 1
 }
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
 $env:GCP_FREE_GCLOUD_COMMAND = $GcloudCommand
 $env:PYTHONUNBUFFERED = "1"
+$env:PYTHONIOENCODING = "utf-8"
 Add-CommandDirectoryToPath $GcloudCommand
 
 if (-not (Test-Path $VenvPython)) {

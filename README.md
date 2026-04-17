@@ -186,6 +186,7 @@ gh workflow run "构建并发布 Windows EXE" -f version=v1.2.3 -f create_releas
 
 - `version` 留空：只构建并上传 artifact，不创建 Release
 - `create_release=true`：会按输入版本创建 GitHub Release，并上传 ZIP 包
+- 发布工作流会先等待当前提交在默认分支上的 `自动检查` 变绿；即使通过了这道门禁，工作流内部仍会再跑一遍语法检查和单元测试
 
 评论指令支持：
 

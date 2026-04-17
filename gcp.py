@@ -87,6 +87,17 @@ from gcp_state import load_json_state, save_json_state
 LOGGER = get_logger()
 
 
+def configure_stdio():
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not stream or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(line_buffering=True, write_through=True)
+        except Exception:
+            continue
+
+
 def print_info(msg):
     LOGGER.info(msg)
     sys.stdout.flush()
@@ -2660,6 +2671,7 @@ def run_cli(args):
 
 
 def main():
+    configure_stdio()
     configure_runtime_logging()
     ensure_google_cloud_libraries()
     print("GCP 免费服务器多功能管理工具")
