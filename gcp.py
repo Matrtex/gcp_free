@@ -11,6 +11,16 @@ import sys
 import time
 import traceback
 
+try:
+    from requests import exceptions as requests_exceptions
+except ImportError:
+    requests_exceptions = None
+
+try:
+    from urllib3 import exceptions as urllib3_exceptions
+except ImportError:
+    urllib3_exceptions = None
+
 from gcp_clients import (
     IMPORT_ERROR_MESSAGE,
     compute_v1,
@@ -837,23 +847,67 @@ def show_reroll_state(state_file=None, project_id=None, instance_info=None):
 
 
 def is_transient_gcp_error(exc):
-    transient_error_types = (
-        google_exceptions.BadGateway,
-        google_exceptions.DeadlineExceeded,
-        google_exceptions.GatewayTimeout,
-        google_exceptions.ServiceUnavailable,
-        google_exceptions.TooManyRequests,
-    )
-    if isinstance(exc, transient_error_types):
+    transient_error_types = []
+    if google_exceptions:
+        transient_error_types.extend(
+            [
+                google_exceptions.BadGateway,
+                google_exceptions.DeadlineExceeded,
+                google_exceptions.GatewayTimeout,
+                google_exceptions.ServiceUnavailable,
+                google_exceptions.TooManyRequests,
+            ]
+        )
+    if requests_exceptions:
+        transient_error_types.extend(
+            [
+                requests_exceptions.ConnectionError,
+                requests_exceptions.Timeout,
+                requests_exceptions.ConnectTimeout,
+                requests_exceptions.ReadTimeout,
+                requests_exceptions.ChunkedEncodingError,
+            ]
+        )
+    if urllib3_exceptions:
+        transient_error_types.extend(
+            [
+                urllib3_exceptions.HTTPError,
+                urllib3_exceptions.MaxRetryError,
+                urllib3_exceptions.ProtocolError,
+                urllib3_exceptions.ReadTimeoutError,
+                urllib3_exceptions.ConnectTimeoutError,
+                urllib3_exceptions.NewConnectionError,
+            ]
+        )
+
+    if transient_error_types and isinstance(exc, tuple(transient_error_types)):
         return True
 
     message = str(exc).lower()
-    transient_markers = [" 429 ", " 502 ", " 503 ", " 504 ", "try again in 30 seconds"]
+    transient_markers = [
+        " 429 ",
+        " 502 ",
+        " 503 ",
+        " 504 ",
+        "try again in 30 seconds",
+        "httpsconnectionpool",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "connection aborted",
+        "connection reset by peer",
+        "remote end closed connection",
+        "read timed out",
+        "connect timeout",
+        "connection broken",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "nodename nor servname provided",
+    ]
     return any(marker in message for marker in transient_markers)
 
 
 def is_operation_in_progress_error(exc):
-    if isinstance(exc, google_exceptions.Conflict):
+    if google_exceptions and isinstance(exc, google_exceptions.Conflict):
         return True
 
     message = str(exc).lower()
@@ -1213,8 +1267,18 @@ def wait_for_instance_status(
             f"等待实例 {instance_name} 进入 {target_text}",
         )
         get_started_at = time.time()
-        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
-        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
+        try:
+            current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
+        except Exception as exc:
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态异常前")
+            if is_transient_gcp_error(exc):
+                print_warning(
+                    f"获取实例 {instance_name} 状态时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
+                )
+                time.sleep(poll_interval)
+                continue
+            raise
         current_status = current_inst.status or "UNKNOWN"
         if current_status in expected_statuses:
             return current_inst, current_status
@@ -1256,8 +1320,18 @@ def wait_for_instance_status_change(
             f"等待实例 {instance_name} 脱离 {'/'.join(sorted(from_statuses))}",
         )
         get_started_at = time.time()
-        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
-        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
+        try:
+            current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
+        except Exception as exc:
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态异常前")
+            if is_transient_gcp_error(exc):
+                print_warning(
+                    f"获取实例 {instance_name} 状态时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
+                )
+                time.sleep(poll_interval)
+                continue
+            raise
         current_status = current_inst.status or "UNKNOWN"
         if current_status not in from_statuses:
             return current_inst, current_status
@@ -1339,8 +1413,18 @@ def wait_for_cpu_platform(
             f"等待实例 {instance_name} 同步 CPU 平台",
         )
         get_started_at = time.time()
-        current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
-        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} CPU 信息")
+        try:
+            current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} CPU 信息")
+        except Exception as exc:
+            last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} CPU 信息异常前")
+            if is_transient_gcp_error(exc):
+                print_warning(
+                    f"获取实例 {instance_name} CPU 信息时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
+                )
+                time.sleep(poll_interval)
+                continue
+            raise
         last_status = current_inst.status or "UNKNOWN"
 
         if last_status == "RUNNING":

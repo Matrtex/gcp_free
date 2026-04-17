@@ -11,6 +11,7 @@ from gcp import (
     get_instance_cache_key,
     get_instance_with_retry,
     get_reroll_cooldown_policy,
+    is_transient_gcp_error,
     is_reroll_state_compatible,
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
@@ -90,6 +91,14 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(cooldown, 6)
         self.assertIn("异常", reason)
 
+    def test_is_transient_gcp_error_recognizes_https_connection_pool_message(self):
+        exc = RuntimeError(
+            "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+            "HTTPSConnectionPool(host='compute.googleapis.com', port=443): "
+            "Max retries exceeded with url: /compute/v1/projects/demo/zones/us-west1-a/instances/vm-1"
+        )
+        self.assertTrue(is_transient_gcp_error(exc))
+
     @patch("gcp.time.sleep", return_value=None)
     @patch("gcp.get_instance_with_retry")
     def test_wait_for_instance_status_change_returns_as_soon_as_status_changes(self, mock_get_instance, _mock_sleep):
@@ -146,6 +155,44 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(instance.status, "STOPPED")
         self.assertTrue(
             any("实例仍为 STOPPING" in args[0] for args, _kwargs in mock_print_info.call_args_list)
+        )
+
+    @patch("gcp.print_warning")
+    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp.time.sleep", return_value=None)
+    @patch("gcp.get_instance_with_retry")
+    def test_wait_for_instance_status_continues_after_transient_network_error(
+        self,
+        mock_get_instance,
+        _mock_sleep,
+        _mock_warn_if_long_pause,
+        mock_print_warning,
+    ):
+        mock_get_instance.side_effect = [
+            RuntimeError(
+                "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+                "HTTPSConnectionPool(host='compute.googleapis.com', port=443): "
+                "Max retries exceeded with url: /compute/v1/projects/demo/zones/us-west1-a/instances/vm-1"
+            ),
+            SimpleNamespace(status="STOPPING"),
+            SimpleNamespace(status="STOPPED"),
+        ]
+
+        instance, status = wait_for_instance_status(
+            instance_client=None,
+            project_id="demo-project",
+            zone="us-west1-a",
+            instance_name="vm-1",
+            expected_statuses={"STOPPED"},
+            timeout=5,
+            poll_interval=0,
+            heartbeat_interval=0,
+        )
+
+        self.assertEqual(status, "STOPPED")
+        self.assertEqual(instance.status, "STOPPED")
+        self.assertTrue(
+            any("临时网络错误" in args[0] for args, _kwargs in mock_print_warning.call_args_list)
         )
 
     @patch("gcp.print_info")
