@@ -96,6 +96,26 @@ pip install google-cloud-compute google-cloud-resource-manager
 python gcp.py
 ```
 
+## 打包 EXE
+
+仓库现在自带 Windows EXE 打包脚本：
+
+```powershell
+python -m pip install -r requirements.txt pyinstaller
+python scripts/build_exe.py --clean --version v1.0.0
+```
+
+构建完成后会在 `dist/release/` 下生成：
+
+- 一个可直接分发的 ZIP 包
+- 一个包含 `gcp_free.exe`、`config.dae`、`cdnip.txt`、`scripts/` 等文件的目录
+
+注意：EXE 只打包了 Python 程序本身，不会替代本机 `gcloud`。本地运行 EXE 仍然需要：
+
+- 已安装 Google Cloud SDK（`gcloud`）
+- 已完成 `gcloud auth login`
+- 已完成 `gcloud auth application-default login`
+
 ## 常用命令
 
 环境预检：
@@ -142,6 +162,70 @@ python gcp.py
 - `scripts/` 目录是否完整
 - `config.dae` / `cdnip.txt` 是否已准备
 - `.gcp_free_logs/` 与 `.gcp_free_state/` 是否可写
+
+## GitHub Actions
+
+仓库现在包含三条 GitHub Actions：
+
+- `自动检查`
+  在 `push` 到 `master` 和 `pull_request` 时自动执行语法检查与单元测试。
+- `构建并发布 Windows EXE`
+  支持两种触发方式：
+  1. 在 GitHub Actions 页面手动运行 `workflow_dispatch`
+  2. 推送形如 `v1.2.3` 的 Git tag，自动构建并创建 Release
+- `PR 评论指令触发 EXE 构建`
+  在 GitHub PR 评论里发送指令后，自动转发到 EXE 构建/发布工作流
+
+如果你想通过命令触发手动构建，可以使用 GitHub CLI：
+
+```bash
+gh workflow run "构建并发布 Windows EXE" -f version=v1.2.3 -f create_release=true -f draft=false
+```
+
+手动运行工作流时：
+
+- `version` 留空：只构建并上传 artifact，不创建 Release
+- `create_release=true`：会按输入版本创建 GitHub Release，并上传 ZIP 包
+
+评论指令支持：
+
+```text
+/build-exe
+/build-exe v1.2.3
+/release-exe v1.2.3
+```
+
+出于安全考虑，评论触发只接受仓库 `OWNER` / `MEMBER` / `COLLABORATOR` 在 **PR 评论** 中发出的指令。
+
+含义如下：
+
+- `/build-exe`：只构建并上传 artifact
+- `/build-exe v1.2.3`：构建时附带版本标识，但不创建 Release
+- `/release-exe v1.2.3`：构建后自动创建 GitHub Release 并上传 ZIP 包
+
+### EXE 代码签名
+
+如果你希望 GitHub Actions 构建出的 `exe` 自动签名，需要在仓库中配置以下密钥：
+
+- `WINDOWS_CODESIGN_CERT_BASE64`
+  把 `.pfx` 证书文件做 Base64 编码后的完整内容
+- `WINDOWS_CODESIGN_CERT_PASSWORD`
+  上述 `.pfx` 证书对应的密码
+
+可选仓库变量：
+
+- `WINDOWS_CODESIGN_TIMESTAMP_URL`
+  时间戳服务地址；留空时默认使用 `http://timestamp.digicert.com`
+
+PowerShell 下可用下面的命令生成 Base64：
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("D:\path\to\codesign.pfx"))
+```
+
+如果未配置上述密钥，工作流仍会正常构建，但产物为未签名版本。
+
+注意：代码签名可以降低 SmartScreen 的拦截概率，但 **不能保证** 完全消除提示。SmartScreen 还会参考证书信誉、下载量和历史分发记录；如果你追求更稳定的效果，通常需要长期使用同一张可信证书，EV 证书效果会更明显。
 
 ## 脚本说明
 

@@ -1,0 +1,43 @@
+name: 自动检查
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.12"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 语法检查
+        run: |
+          python -m py_compile gcp.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_logging.py gcp_models.py gcp_state.py scripts/build_exe.py
+
+      - name: 运行测试
+        run: |
+          python -m unittest discover -s tests -v

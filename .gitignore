@@ -6,3 +6,5 @@
 .gcp_free_state/
 __pycache__/
 tests/__pycache__/
+build/
+dist/

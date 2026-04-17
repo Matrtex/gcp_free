@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 # 远程脚本映射：CLI 和菜单都通过这个表选择本地脚本文件。
 LOCAL_SCRIPT_FILES = {
@@ -41,16 +42,26 @@ DEFAULT_REROLL_STATE_FILE = "reroll_state.json"
 # GCP operation 等待参数：用于 start/stop/create/delete 等长操作。
 OPERATION_WAIT_TIMEOUT = 300
 OPERATION_POLL_INTERVAL = 3
+OPERATION_WAIT_REQUEST_TIMEOUT = 20
+OPERATION_GET_REQUEST_TIMEOUT = 10
+
+# 长时间停顿检测：用于标记进程可能被冻结、远程会话挂起，或单次 API 调用异常阻塞。
+LONG_PAUSE_WARNING_THRESHOLD = 30
 
 # 通用 API 重试参数：这里只兜底瞬时错误和资源冲突，避免高频请求把 502/409 顶得更高。
 INSTANCE_API_MAX_RETRIES = 4
 INSTANCE_API_RETRY_BASE_DELAY = 3
 INSTANCE_CONFLICT_RETRY_DELAY = 5
+INSTANCE_GET_REQUEST_TIMEOUT = 10
+INSTANCE_MUTATION_REQUEST_TIMEOUT = 20
+RESOURCE_LIST_REQUEST_TIMEOUT = 20
+RESOURCE_READ_REQUEST_TIMEOUT = 15
 
 # 实例状态轮询参数：这里控制 RUNNING/STOPPED 等状态切换的观察频率。
 # 目前偏激进，优先追求刷 CPU 周期更短；如果后续 429/502 明显增多，再适当调大。
 INSTANCE_STATUS_WAIT_TIMEOUT = 180
 INSTANCE_STATUS_POLL_INTERVAL = 0.5
+INSTANCE_STATUS_HEARTBEAT_INTERVAL = 5
 INSTANCE_TRANSITION_CONFIRM_TIMEOUT = 6
 INSTANCE_TRANSITION_CONFIRM_POLL_INTERVAL = 0.5
 
@@ -106,3 +117,25 @@ def get_region_config(region):
 
 def resolve_project_path(root_dir, *parts):
     return Path(root_dir, *parts)
+
+
+def get_bundle_root():
+    # PyInstaller onefile 运行时，静态资源会先解包到 _MEIPASS。
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+
+def get_runtime_root():
+    # 日志、状态文件和用户可覆盖的配置，统一落在 exe 所在目录。
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def resolve_asset_path(*parts):
+    # 优先读取 exe 同目录下的外部资源，便于用户直接替换模板或配置。
+    runtime_path = get_runtime_root().joinpath(*parts)
+    if runtime_path.exists():
+        return runtime_path
+    return get_bundle_root().joinpath(*parts)

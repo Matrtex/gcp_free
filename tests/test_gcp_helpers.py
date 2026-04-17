@@ -9,13 +9,16 @@ from gcp import (
     find_instance_by_name,
     ensure_instance_running,
     get_instance_cache_key,
+    get_instance_with_retry,
     get_reroll_cooldown_policy,
     is_reroll_state_compatible,
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
     resolve_os_config,
     summarize_text_block,
+    warn_if_long_pause,
     wait_for_instance_status_change,
+    wait_for_instance_status,
 )
 from gcp_models import InstanceInfo, RerollStats
 from gcp_state import save_json_state
@@ -80,7 +83,7 @@ class GcpHelpersTestCase(unittest.TestCase):
     def test_get_reroll_cooldown_policy_uses_fast_path_after_long_stop_wait(self):
         cooldown, reason = get_reroll_cooldown_policy(had_exception=False, stop_wait_seconds=8)
         self.assertEqual(cooldown, 0)
-        self.assertIn("跳过长冷却", reason)
+        self.assertIn("不再追加额外冷却", reason)
 
     def test_get_reroll_cooldown_policy_uses_error_backoff_on_exception(self):
         cooldown, reason = get_reroll_cooldown_policy(had_exception=True, stop_wait_seconds=0)
@@ -107,6 +110,80 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertEqual(status, "PROVISIONING")
         self.assertEqual(instance.status, "PROVISIONING")
+
+    @patch("gcp.print_info")
+    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp.time.sleep", return_value=None)
+    @patch("gcp.time.time")
+    @patch("gcp.get_instance_with_retry")
+    def test_wait_for_instance_status_emits_heartbeat_when_status_stays_unchanged(
+        self,
+        mock_get_instance,
+        mock_time,
+        _mock_sleep,
+        _mock_warn_if_long_pause,
+        mock_print_info,
+    ):
+        mock_get_instance.side_effect = [
+            SimpleNamespace(status="STOPPING"),
+            SimpleNamespace(status="STOPPING"),
+            SimpleNamespace(status="STOPPED"),
+        ]
+        mock_time.side_effect = [0, 0, 0, 0, 0, 0, 5.1, 5.1, 5.1, 5.1, 5.1, 5.2, 5.2]
+
+        instance, status = wait_for_instance_status(
+            instance_client=None,
+            project_id="demo-project",
+            zone="us-west1-a",
+            instance_name="vm-1",
+            expected_statuses={"STOPPED"},
+            timeout=10,
+            poll_interval=0,
+            heartbeat_interval=5,
+        )
+
+        self.assertEqual(status, "STOPPED")
+        self.assertEqual(instance.status, "STOPPED")
+        self.assertTrue(
+            any("实例仍为 STOPPING" in args[0] for args, _kwargs in mock_print_info.call_args_list)
+        )
+
+    @patch("gcp.print_info")
+    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp.time.sleep", return_value=None)
+    @patch("gcp.time.time")
+    @patch("gcp.get_instance_with_retry")
+    def test_wait_for_instance_status_change_emits_heartbeat_when_status_stays_unchanged(
+        self,
+        mock_get_instance,
+        mock_time,
+        _mock_sleep,
+        _mock_warn_if_long_pause,
+        mock_print_info,
+    ):
+        mock_get_instance.side_effect = [
+            SimpleNamespace(status="RUNNING"),
+            SimpleNamespace(status="RUNNING"),
+            SimpleNamespace(status="STOPPING"),
+        ]
+        mock_time.side_effect = [0, 0, 0, 0, 0, 0, 5.1, 5.1, 5.1, 5.1, 5.1, 5.2, 5.2]
+
+        instance, status = wait_for_instance_status_change(
+            instance_client=None,
+            project_id="demo-project",
+            zone="us-west1-a",
+            instance_name="vm-1",
+            from_statuses={"RUNNING"},
+            timeout=10,
+            poll_interval=0,
+            heartbeat_interval=5,
+        )
+
+        self.assertEqual(status, "STOPPING")
+        self.assertEqual(instance.status, "STOPPING")
+        self.assertTrue(
+            any("实例仍为 RUNNING" in args[0] for args, _kwargs in mock_print_info.call_args_list)
+        )
 
     @patch("gcp.wait_for_instance_status")
     @patch("gcp.wait_for_operation")
@@ -179,6 +256,29 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertEqual(instance.zone, "us-west1-a")
         mock_list_instances.assert_not_called()
+
+    def test_get_instance_with_retry_passes_request_timeout(self):
+        instance_client = SimpleNamespace(
+            get=lambda **kwargs: SimpleNamespace(status="RUNNING", kwargs=kwargs)
+        )
+
+        result = get_instance_with_retry(
+            instance_client,
+            "demo-project",
+            "us-west1-a",
+            "vm-1",
+        )
+
+        self.assertEqual(result.kwargs["timeout"], 10)
+
+    @patch("gcp.print_warning")
+    @patch("gcp.time.time", side_effect=[65, 65])
+    def test_warn_if_long_pause_emits_clear_warning(self, _mock_time, mock_print_warning):
+        current_time = warn_if_long_pause(0, "等待实例 vm-1 进入 STOPPED")
+        self.assertEqual(current_time, 65)
+        self.assertTrue(
+            any("检测到长时间挂起/冻结" in args[0] for args, _kwargs in mock_print_warning.call_args_list)
+        )
 
 
 if __name__ == "__main__":

@@ -36,16 +36,24 @@ from gcp_config import (
     INSTANCE_API_MAX_RETRIES,
     INSTANCE_API_RETRY_BASE_DELAY,
     INSTANCE_CONFLICT_RETRY_DELAY,
+    INSTANCE_GET_REQUEST_TIMEOUT,
+    INSTANCE_MUTATION_REQUEST_TIMEOUT,
     INSTANCE_TRANSITION_CONFIRM_POLL_INTERVAL,
     INSTANCE_TRANSITION_CONFIRM_TIMEOUT,
     INSTANCE_STATUS_POLL_INTERVAL,
+    INSTANCE_STATUS_HEARTBEAT_INTERVAL,
     INSTANCE_STATUS_WAIT_TIMEOUT,
     LOCAL_SCRIPT_FILES,
     LOG_DIR_NAME,
+    LONG_PAUSE_WARNING_THRESHOLD,
+    OPERATION_GET_REQUEST_TIMEOUT,
     OPERATION_POLL_INTERVAL,
+    OPERATION_WAIT_REQUEST_TIMEOUT,
     OPERATION_WAIT_TIMEOUT,
     OS_IMAGE_OPTIONS,
     REGION_OPTIONS,
+    RESOURCE_LIST_REQUEST_TIMEOUT,
+    RESOURCE_READ_REQUEST_TIMEOUT,
     REMOTE_COMMAND_TIMEOUT,
     REMOTE_CONFIG_APPLY_TIMEOUT,
     REMOTE_PROBE_TIMEOUT,
@@ -68,6 +76,8 @@ from gcp_config import (
     SUBPROCESS_ERROR_LINE_LIMIT,
     SUBPROCESS_ERROR_SUMMARY_LIMIT,
     get_region_config as get_region_config_from_config,
+    get_runtime_root,
+    resolve_asset_path,
 )
 from gcp_doctor import find_gcloud_command, run_doctor
 from gcp_logging import configure_logger, get_logger
@@ -119,15 +129,29 @@ def format_duration(seconds):
     return f"{secs}秒"
 
 
+def warn_if_long_pause(last_activity_time, context, threshold=LONG_PAUSE_WARNING_THRESHOLD):
+    now = time.time()
+    if last_activity_time is None:
+        return now
+
+    gap = now - last_activity_time
+    if gap >= threshold:
+        print_warning(
+            f"检测到长时间挂起/冻结：{context} 距上次活动已过去 {format_duration(gap)}，"
+            "可能是系统休眠、远程会话挂起、网络阻塞或进程被暂停。"
+        )
+    return now
+
+
 def get_default_log_file():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = str(get_runtime_root())
     log_dir = os.path.join(root_dir, LOG_DIR_NAME)
     os.makedirs(log_dir, exist_ok=True)
     return os.path.join(log_dir, "gcp_free.log")
 
 
 def get_default_reroll_state_file():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = str(get_runtime_root())
     state_dir = os.path.join(root_dir, STATE_DIR_NAME)
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, DEFAULT_REROLL_STATE_FILE)
@@ -382,7 +406,9 @@ def list_instances_via_gcloud(project_id):
             "list",
             "--project",
             project_id,
-            "--format=json(name,zone,status,cpuPlatform,networkInterfaces.network,networkInterfaces.networkIP,networkInterfaces.accessConfigs.natIP)",
+            # gcloud 的 JSON 投影在部分嵌套字段上会直接裁掉 networkInterfaces，导致 IP 全变成 "-".
+            # 这里直接取完整 JSON，再由本地代码提取需要的字段，结果更稳定。
+            "--format=json",
         ],
         capture_output=True,
         text=True,
@@ -414,7 +440,7 @@ def print_doctor_results(checks):
 
 
 def handle_doctor(project_id=None):
-    requirements_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), REQUIREMENTS_FILE)
+    requirements_path = str(resolve_asset_path(REQUIREMENTS_FILE))
     checks = run_doctor(requirements_path, project_id=project_id)
     print_doctor_results(checks)
     has_failures = any(item.status == "FAIL" for item in checks)
@@ -773,7 +799,8 @@ def get_reroll_cooldown_policy(had_exception=False, stop_wait_seconds=0):
     if had_exception:
         return REROLL_ERROR_COOLDOWN, "本轮出现异常，使用保护性冷却"
     if stop_wait_seconds >= REROLL_STOP_WAIT_THRESHOLD:
-        return REROLL_POST_STOP_FAST_COOLDOWN, "本轮已等待较久实例关停，跳过长冷却"
+        waited = format_duration(stop_wait_seconds)
+        return REROLL_POST_STOP_FAST_COOLDOWN, f"本轮关停已耗时 {waited}，不再追加额外冷却"
     return REROLL_LOOP_COOLDOWN, "正常轮次，使用短冷却"
 
 
@@ -801,6 +828,7 @@ def show_reroll_state(state_file=None, project_id=None, instance_info=None):
 def is_transient_gcp_error(exc):
     transient_error_types = (
         google_exceptions.BadGateway,
+        google_exceptions.DeadlineExceeded,
         google_exceptions.GatewayTimeout,
         google_exceptions.ServiceUnavailable,
         google_exceptions.TooManyRequests,
@@ -865,12 +893,19 @@ def wait_for_operation_result(
 ):
     deadline = time.time() + timeout
     last_error = None
+    last_activity_time = time.time()
 
     try:
-        operation = operation_client.wait(**kwargs)
+        wait_started_at = time.time()
+        operation = operation_client.wait(timeout=OPERATION_WAIT_REQUEST_TIMEOUT, **kwargs)
+        last_activity_time = warn_if_long_pause(wait_started_at, f"{operation_desc} 的 wait 接口调用")
         ensure_operation_success(operation, operation_desc)
         return operation
     except Exception as exc:
+        last_activity_time = warn_if_long_pause(
+            last_activity_time,
+            f"{operation_desc} 的 wait 接口返回异常前",
+        )
         if not is_transient_gcp_error(exc):
             raise
         last_error = exc
@@ -879,9 +914,16 @@ def wait_for_operation_result(
         )
 
     while time.time() < deadline:
+        last_activity_time = warn_if_long_pause(last_activity_time, f"等待 {operation_desc} 完成")
         try:
-            operation = operation_client.get(**kwargs)
+            get_started_at = time.time()
+            operation = operation_client.get(timeout=OPERATION_GET_REQUEST_TIMEOUT, **kwargs)
+            last_activity_time = warn_if_long_pause(get_started_at, f"{operation_desc} 状态轮询")
         except Exception as exc:
+            last_activity_time = warn_if_long_pause(
+                last_activity_time,
+                f"{operation_desc} 状态轮询异常前",
+            )
             if not is_transient_gcp_error(exc):
                 raise
             last_error = exc
@@ -968,7 +1010,12 @@ def call_with_retries(
 def get_instance_with_retry(instance_client, project_id, zone, instance_name):
     return call_with_retries(
         f"获取实例 {instance_name} 状态",
-        lambda: instance_client.get(project=project_id, zone=zone, instance=instance_name),
+        lambda: instance_client.get(
+            project=project_id,
+            zone=zone,
+            instance=instance_name,
+            timeout=INSTANCE_GET_REQUEST_TIMEOUT,
+        ),
     )
 
 
@@ -999,14 +1046,24 @@ def prepare_instance_for_remote(project_id, instance_info, remote_config):
 def start_instance_with_retry(instance_client, project_id, zone, instance_name):
     return call_with_retries(
         f"启动虚拟机 {instance_name}",
-        lambda: instance_client.start(project=project_id, zone=zone, instance=instance_name),
+        lambda: instance_client.start(
+            project=project_id,
+            zone=zone,
+            instance=instance_name,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
 def stop_instance_with_retry(instance_client, project_id, zone, instance_name):
     return call_with_retries(
         f"关停虚拟机 {instance_name}",
-        lambda: instance_client.stop(project=project_id, zone=zone, instance=instance_name),
+        lambda: instance_client.stop(
+            project=project_id,
+            zone=zone,
+            instance=instance_name,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
@@ -1018,6 +1075,7 @@ def insert_instance_with_retry(instance_client, project_id, zone, instance_resou
             project=project_id,
             zone=zone,
             instance_resource=instance_resource,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
         ),
     )
 
@@ -1025,14 +1083,23 @@ def insert_instance_with_retry(instance_client, project_id, zone, instance_resou
 def delete_instance_with_retry(instance_client, project_id, zone, instance_name):
     return call_with_retries(
         f"删除实例 {instance_name}",
-        lambda: instance_client.delete(project=project_id, zone=zone, instance=instance_name),
+        lambda: instance_client.delete(
+            project=project_id,
+            zone=zone,
+            instance=instance_name,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
 def get_image_from_family_with_retry(images_client, project, family):
     return call_with_retries(
         f"获取镜像族 {project}/{family}",
-        lambda: images_client.get_from_family(project=project, family=family),
+        lambda: images_client.get_from_family(
+            project=project,
+            family=family,
+            timeout=RESOURCE_READ_REQUEST_TIMEOUT,
+        ),
     )
 
 
@@ -1040,42 +1107,70 @@ def insert_firewall_with_retry(firewall_client, project_id, firewall_rule):
     rule_name = getattr(firewall_rule, "name", "未命名规则")
     return call_with_retries(
         f"创建防火墙规则 {rule_name}",
-        lambda: firewall_client.insert(project=project_id, firewall_resource=firewall_rule),
+        lambda: firewall_client.insert(
+            project=project_id,
+            firewall_resource=firewall_rule,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
 def delete_firewall_with_retry(firewall_client, project_id, rule_name):
     return call_with_retries(
         f"删除防火墙规则 {rule_name}",
-        lambda: firewall_client.delete(project=project_id, firewall=rule_name),
+        lambda: firewall_client.delete(
+            project=project_id,
+            firewall=rule_name,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
 def delete_disk_with_retry(disk_client, project_id, zone, disk_name):
     return call_with_retries(
         f"删除磁盘 {disk_name}",
-        lambda: disk_client.delete(project=project_id, zone=zone, disk=disk_name),
+        lambda: disk_client.delete(
+            project=project_id,
+            zone=zone,
+            disk=disk_name,
+            timeout=INSTANCE_MUTATION_REQUEST_TIMEOUT,
+        ),
     )
 
 
 def search_projects_with_retry(projects_client, request):
     return call_with_retries(
         "扫描 GCP 项目列表",
-        lambda: list(projects_client.search_projects(request=request)),
+        lambda: list(
+            projects_client.search_projects(
+                request=request,
+                timeout=RESOURCE_LIST_REQUEST_TIMEOUT,
+            )
+        ),
     )
 
 
 def list_zones_with_retry(zones_client, project_id):
     return call_with_retries(
         f"获取项目 {project_id} 的可用区列表",
-        lambda: list(zones_client.list(project=project_id)),
+        lambda: list(
+            zones_client.list(
+                project=project_id,
+                timeout=RESOURCE_LIST_REQUEST_TIMEOUT,
+            )
+        ),
     )
 
 
 def aggregated_list_instances_with_retry(instance_client, request, project_id):
     return call_with_retries(
         f"扫描项目 {project_id} 的实例列表",
-        lambda: list(instance_client.aggregated_list(request=request)),
+        lambda: list(
+            instance_client.aggregated_list(
+                request=request,
+                timeout=RESOURCE_LIST_REQUEST_TIMEOUT,
+            )
+        ),
     )
 
 
@@ -1087,6 +1182,7 @@ def wait_for_instance_status(
     expected_statuses,
     timeout=INSTANCE_STATUS_WAIT_TIMEOUT,
     poll_interval=INSTANCE_STATUS_POLL_INTERVAL,
+    heartbeat_interval=INSTANCE_STATUS_HEARTBEAT_INTERVAL,
 ):
     if isinstance(expected_statuses, str):
         expected_statuses = {expected_statuses}
@@ -1094,11 +1190,20 @@ def wait_for_instance_status(
         expected_statuses = set(expected_statuses)
 
     deadline = time.time() + timeout
+    wait_start_time = time.time()
     last_status = None
+    last_heartbeat_time = None
+    last_activity_time = time.time()
     target_text = "/".join(sorted(expected_statuses))
 
     while time.time() < deadline:
+        last_activity_time = warn_if_long_pause(
+            last_activity_time,
+            f"等待实例 {instance_name} 进入 {target_text}",
+        )
+        get_started_at = time.time()
         current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
         current_status = current_inst.status or "UNKNOWN"
         if current_status in expected_statuses:
             return current_inst, current_status
@@ -1106,6 +1211,11 @@ def wait_for_instance_status(
         if current_status != last_status:
             print_info(f"实例当前状态: {current_status}，继续等待进入 {target_text}...")
             last_status = current_status
+            last_heartbeat_time = time.time()
+        elif heartbeat_interval and last_heartbeat_time is not None and time.time() - last_heartbeat_time >= heartbeat_interval:
+            waited = format_duration(time.time() - wait_start_time)
+            print_info(f"实例仍为 {current_status}，已等待 {waited}，继续等待进入 {target_text}...")
+            last_heartbeat_time = time.time()
 
         time.sleep(poll_interval)
 
@@ -1120,13 +1230,23 @@ def wait_for_instance_status_change(
     from_statuses,
     timeout=INSTANCE_TRANSITION_CONFIRM_TIMEOUT,
     poll_interval=INSTANCE_TRANSITION_CONFIRM_POLL_INTERVAL,
+    heartbeat_interval=INSTANCE_STATUS_HEARTBEAT_INTERVAL,
 ):
     from_statuses = set(from_statuses)
     deadline = time.time() + timeout
+    wait_start_time = time.time()
     last_status = None
+    last_heartbeat_time = None
+    last_activity_time = time.time()
 
     while time.time() < deadline:
+        last_activity_time = warn_if_long_pause(
+            last_activity_time,
+            f"等待实例 {instance_name} 脱离 {'/'.join(sorted(from_statuses))}",
+        )
+        get_started_at = time.time()
         current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
         current_status = current_inst.status or "UNKNOWN"
         if current_status not in from_statuses:
             return current_inst, current_status
@@ -1134,6 +1254,11 @@ def wait_for_instance_status_change(
         if current_status != last_status:
             print_info(f"实例当前状态: {current_status}，继续等待状态变化...")
             last_status = current_status
+            last_heartbeat_time = time.time()
+        elif heartbeat_interval and last_heartbeat_time is not None and time.time() - last_heartbeat_time >= heartbeat_interval:
+            waited = format_duration(time.time() - wait_start_time)
+            print_info(f"实例仍为 {current_status}，已等待 {waited}，继续等待状态变化...")
+            last_heartbeat_time = time.time()
 
         time.sleep(poll_interval)
 
@@ -1195,9 +1320,16 @@ def wait_for_cpu_platform(
     deadline = time.time() + timeout
     attempt_counter = 0
     last_status = "UNKNOWN"
+    last_activity_time = time.time()
 
     while time.time() < deadline:
+        last_activity_time = warn_if_long_pause(
+            last_activity_time,
+            f"等待实例 {instance_name} 同步 CPU 平台",
+        )
+        get_started_at = time.time()
         current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
+        last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} CPU 信息")
         last_status = current_inst.status or "UNKNOWN"
 
         if last_status == "RUNNING":
@@ -1294,9 +1426,14 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
 
     print_info(f"目标实例: {instance_name} ({zone})")
     print_info("目标: 只要 CPU 包含 'AMD' 或 'EPYC' 即停止。")
+    last_loop_activity_time = time.time()
 
     try:
         while True:
+            last_loop_activity_time = warn_if_long_pause(
+                last_loop_activity_time,
+                f"刷 CPU 主循环（实例 {instance_name}）",
+            )
             had_exception = False
             stop_wait_seconds = 0
             stats.attempts += 1
@@ -1367,6 +1504,7 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
                 )
                 sleep_with_countdown(cooldown, "冷却中")
                 print_info("冷却结束，开始下一轮尝试。")
+            last_loop_activity_time = time.time()
     finally:
         print_reroll_summary(stats)
         print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态文件摘要")
@@ -1663,7 +1801,7 @@ def get_local_script_path(script_key):
         print_warning("未知的脚本类型，无法执行。")
         return None
 
-    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", script_name)
+    local_path = str(resolve_asset_path("scripts", script_name))
     if not os.path.isfile(local_path):
         print_warning(f"找不到本地脚本文件: {local_path}")
         return None
@@ -1982,7 +2120,7 @@ def select_traffic_monitor_script():
 
 
 def deploy_dae_config(project_id, instance_info, remote_config, dry_run=False):
-    local_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.dae")
+    local_config = str(resolve_asset_path("config.dae"))
     if not os.path.isfile(local_config):
         print_warning(f"找不到本地配置文件: {local_config}")
         return False

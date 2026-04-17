@@ -1,0 +1,146 @@
+name: 构建并发布 Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号，例如 v1.2.3；留空时只生成手动构建产物"
+        required: false
+        type: string
+      create_release:
+        description: "是否自动创建 GitHub Release"
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: "创建 Release 时是否使用草稿状态"
+        required: true
+        default: true
+        type: boolean
+      release_notes:
+        description: "可选，Release 说明"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖与打包工具
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: 准备代码签名证书
+        if: secrets.WINDOWS_CODESIGN_CERT_BASE64 != '' && secrets.WINDOWS_CODESIGN_CERT_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}"))
+          $timestampUrl = "${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}"
+          if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+            $timestampUrl = "http://timestamp.digicert.com"
+          }
+          "SIGN_PFX_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGN_PFX_PASSWORD=${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGN_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 运行测试
+        run: |
+          python -m py_compile gcp.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_logging.py gcp_models.py gcp_state.py scripts/build_exe.py
+          python -m unittest discover -s tests -v
+
+      - name: 计算构建版本
+        shell: pwsh
+        run: |
+          $eventName = "${{ github.event_name }}"
+          $inputVersion = "${{ inputs.version }}"
+          $createRelease = "${{ inputs.create_release }}"
+          $draftRelease = "${{ inputs.draft }}"
+          $releaseNotes = @"
+${{ inputs.release_notes }}
+"@
+
+          if ($eventName -eq "push") {
+            $version = "${{ github.ref_name }}"
+            $createRelease = "true"
+            $draftRelease = "false"
+            $releaseNotes = "自动从 tag ${version} 构建并发布 Windows EXE。"
+          } elseif ([string]::IsNullOrWhiteSpace($inputVersion)) {
+            $version = "manual-${{ github.run_number }}-${{ github.sha }}".Substring(0, 22)
+          } else {
+            $version = $inputVersion.Trim()
+          }
+
+          if ($createRelease -eq "true" -and [string]::IsNullOrWhiteSpace($inputVersion) -and $eventName -ne "push") {
+            throw "创建 Release 时必须提供 version。"
+          }
+
+          "BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CREATE_RELEASE=$createRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_DRAFT=$draftRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_NOTES<<EOF" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $releaseNotes | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 构建 EXE
+        shell: pwsh
+        run: |
+          $command = @(
+            "python",
+            "scripts/build_exe.py",
+            "--clean",
+            "--version",
+            "${{ env.BUILD_VERSION }}"
+          )
+          if (-not [string]::IsNullOrWhiteSpace($env:SIGN_PFX_PATH)) {
+            $command += @("--sign-pfx", $env:SIGN_PFX_PATH, "--sign-password", $env:SIGN_PFX_PASSWORD)
+            if (-not [string]::IsNullOrWhiteSpace($env:SIGN_TIMESTAMP_URL)) {
+              $command += @("--timestamp-url", $env:SIGN_TIMESTAMP_URL)
+            }
+          }
+          & $command[0] $command[1..($command.Length - 1)]
+
+      - name: 清理代码签名证书
+        if: always() && env.SIGN_PFX_PATH != ''
+        shell: pwsh
+        run: |
+          if (Test-Path $env:SIGN_PFX_PATH) {
+            Remove-Item -LiteralPath $env:SIGN_PFX_PATH -Force
+          }
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcp-free-windows-exe-${{ env.BUILD_VERSION }}
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: 创建 GitHub Release
+        if: env.CREATE_RELEASE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BUILD_VERSION }}
+          name: ${{ env.BUILD_VERSION }}
+          draft: ${{ env.RELEASE_DRAFT == 'true' }}
+          body: ${{ env.RELEASE_NOTES }}
+          files: |
+            dist/release/*.zip
