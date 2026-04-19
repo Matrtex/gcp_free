@@ -60,6 +60,10 @@ from gcp_config import (
     OPERATION_POLL_INTERVAL,
     OPERATION_WAIT_REQUEST_TIMEOUT,
     OPERATION_WAIT_TIMEOUT,
+    OAUTH_CIRCUIT_BREAKER_BASE_COOLDOWN,
+    OAUTH_CIRCUIT_BREAKER_MAX_COOLDOWN,
+    OAUTH_CIRCUIT_BREAKER_STEP_COOLDOWN,
+    OAUTH_CIRCUIT_BREAKER_THRESHOLD,
     OS_IMAGE_OPTIONS,
     REGION_OPTIONS,
     RESOURCE_LIST_REQUEST_TIMEOUT,
@@ -731,7 +735,12 @@ def print_reroll_summary(stats):
     print("\n" + "-" * 50)
     print_info("刷 AMD 运行摘要")
     print(f"总耗时: {format_duration(time.time() - stats.start_time)}")
-    print(f"尝试轮次: {stats.attempts} | 异常轮次: {stats.exception_count}")
+    soft_count = get_soft_exception_count(stats)
+    print(f"尝试轮次: {stats.attempts} | 软异常轮次: {soft_count} | 硬异常轮次: {stats.hard_failure_count}")
+
+    exception_breakdown = format_exception_breakdown(stats)
+    if exception_breakdown:
+        print(f"异常明细: {exception_breakdown}")
 
     if stats.success_cpu:
         print_success(f"命中目标 CPU: {stats.success_cpu}")
@@ -763,7 +772,9 @@ def load_reroll_stats_from_file(state_path):
     if not required_keys.issubset(payload):
         return None
     try:
-        return RerollStats.from_dict(payload)
+        stats = RerollStats.from_dict(payload)
+        recalculate_exception_count(stats)
+        return stats
     except (TypeError, ValueError, KeyError):
         return None
 
@@ -788,9 +799,13 @@ def print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态"):
     print(f"目标实例: {stats.instance_name} ({stats.zone})")
     print(f"开始时间: {format_timestamp(stats.start_time)}")
     print(f"最后更新: {format_timestamp(stats.last_updated)}")
-    print(f"累计尝试: {stats.attempts} | 累计异常: {stats.exception_count}")
+    soft_count = get_soft_exception_count(stats)
+    print(f"累计尝试: {stats.attempts} | 软异常: {soft_count} | 硬异常: {stats.hard_failure_count}")
     print(f"最近 CPU: {stats.last_cpu or '-'}")
     print(f"最近异常: {stats.last_error or '-'}")
+    exception_breakdown = format_exception_breakdown(stats)
+    if exception_breakdown:
+        print(f"异常明细: {exception_breakdown}")
     if stats.success_cpu:
         print_success(f"状态文件记录的命中 CPU: {stats.success_cpu}")
     if stats.cpu_counter:
@@ -809,14 +824,130 @@ def print_reroll_progress(stats, state_path):
     if stats.cpu_counter:
         top_cpu, top_count = Counter(stats.cpu_counter).most_common(1)[0]
         top_cpu = f"{top_cpu} x{top_count}"
+    soft_count = get_soft_exception_count(stats)
     print_info(
-        f"累计进度: 已尝试 {stats.attempts} 次 | 异常 {stats.exception_count} 次 | "
+        f"累计进度: 已尝试 {stats.attempts} 次 | 软异常 {soft_count} 次 | 硬异常 {stats.hard_failure_count} 次 | "
         f"最高频结果 {top_cpu} | 状态文件 {state_path}"
     )
 
 
-def get_reroll_cooldown_policy(had_exception=False, stop_wait_seconds=0):
+def get_soft_exception_count(stats):
+    return stats.oauth_timeout_count + stats.compute_timeout_count + stats.instance_stuck_count
+
+
+def get_legacy_exception_count(stats):
+    classified = get_soft_exception_count(stats) + stats.hard_failure_count
+    return max(0, stats.exception_count - classified)
+
+
+def format_exception_breakdown(stats):
+    parts = []
+    if stats.oauth_timeout_count:
+        parts.append(f"OAuth 超时 {stats.oauth_timeout_count}")
+    if stats.compute_timeout_count:
+        parts.append(f"Compute 超时 {stats.compute_timeout_count}")
+    if stats.instance_stuck_count:
+        parts.append(f"实例卡住 {stats.instance_stuck_count}")
+    if stats.hard_failure_count:
+        parts.append(f"硬异常 {stats.hard_failure_count}")
+    legacy_count = get_legacy_exception_count(stats)
+    if legacy_count:
+        parts.append(f"历史未分类 {legacy_count}")
+    return " | ".join(parts)
+
+
+def is_oauth_timeout_error(exc):
+    return "oauth2.googleapis.com" in str(exc).lower()
+
+
+def is_compute_timeout_error(exc):
+    message = str(exc).lower()
+    return "compute.googleapis.com" in message or "/compute/v1/" in message
+
+
+def is_instance_stuck_error(exc):
+    message = str(exc)
+    return (
+        "等待虚拟机 " in message
+        and ("关停超时" in message or "启动超时" in message)
+    )
+
+
+def classify_reroll_exception(exc):
+    if is_oauth_timeout_error(exc):
+        return "oauth_timeout"
+    if is_instance_stuck_error(exc):
+        return "instance_stuck"
+    if is_compute_timeout_error(exc):
+        return "compute_timeout"
+    return "hard_failure"
+
+
+def format_exception_kind_label(exception_kind):
+    return {
+        "oauth_timeout": "OAuth 超时",
+        "compute_timeout": "Compute 超时",
+        "instance_stuck": "实例卡住",
+        "hard_failure": "硬异常",
+    }.get(exception_kind, "未知异常")
+
+
+def recalculate_exception_count(stats):
+    classified = get_soft_exception_count(stats) + stats.hard_failure_count
+    if stats.exception_count < classified:
+        stats.exception_count = classified
+    return stats.exception_count
+
+
+def record_reroll_exception(stats, exc):
+    exception_kind = classify_reroll_exception(exc)
+    if exception_kind == "oauth_timeout":
+        stats.oauth_timeout_count += 1
+        stats.consecutive_oauth_timeouts += 1
+    else:
+        stats.consecutive_oauth_timeouts = 0
+        if exception_kind == "compute_timeout":
+            stats.compute_timeout_count += 1
+        elif exception_kind == "instance_stuck":
+            stats.instance_stuck_count += 1
+        else:
+            stats.hard_failure_count += 1
+
+    stats.exception_count += 1
+    recalculate_exception_count(stats)
+
+    summarized_error = summarize_exception(exc)
+    stats.last_error = summarized_error
+    remember_recent(
+        stats.recent_errors,
+        f"{format_exception_kind_label(exception_kind)}: {summarized_error}",
+        limit=5,
+    )
+    return exception_kind, summarized_error
+
+
+def get_oauth_circuit_breaker_cooldown(consecutive_oauth_timeouts):
+    if consecutive_oauth_timeouts < OAUTH_CIRCUIT_BREAKER_THRESHOLD:
+        return 0
+    extra_steps = consecutive_oauth_timeouts - OAUTH_CIRCUIT_BREAKER_THRESHOLD
+    cooldown = OAUTH_CIRCUIT_BREAKER_BASE_COOLDOWN + (extra_steps * OAUTH_CIRCUIT_BREAKER_STEP_COOLDOWN)
+    return min(OAUTH_CIRCUIT_BREAKER_MAX_COOLDOWN, cooldown)
+
+
+def get_reroll_cooldown_policy(
+    had_exception=False,
+    stop_wait_seconds=0,
+    exception_kind=None,
+    consecutive_oauth_timeouts=0,
+):
     # 正常轮次尽量快刷；只有异常时才放大退避，避免把 502/409 频率继续顶高。
+    if exception_kind == "oauth_timeout":
+        breaker_cooldown = get_oauth_circuit_breaker_cooldown(consecutive_oauth_timeouts)
+        if breaker_cooldown > 0:
+            return (
+                breaker_cooldown,
+                f"连续 {consecutive_oauth_timeouts} 轮 OAuth 超时，触发认证链路熔断",
+            )
     if had_exception:
         return REROLL_ERROR_COOLDOWN, "本轮出现异常，使用保护性冷却"
     if stop_wait_seconds >= REROLL_STOP_WAIT_THRESHOLD:
@@ -1530,6 +1661,7 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
                 f"刷 CPU 主循环（实例 {instance_name}）",
             )
             had_exception = False
+            exception_kind = None
             stop_wait_seconds = 0
             stats.attempts += 1
             print("\n" + "=" * 50)
@@ -1552,10 +1684,12 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
 
                 current_platform = str(current_platform)
                 stats.cpu_counter[current_platform] = stats.cpu_counter.get(current_platform, 0) + 1
+                stats.consecutive_oauth_timeouts = 0
                 remember_recent(stats.recent_results, current_platform)
                 stats.last_cpu = current_platform
                 stats.last_error = None
                 stats.last_updated = time.time()
+                recalculate_exception_count(stats)
                 save_json_state(state_path, stats.to_dict())
                 print_reroll_progress(stats, state_path)
 
@@ -1573,18 +1707,21 @@ def reroll_cpu_loop(project_id, instance_info, state_file=None, resume=False):
                 _, stop_wait_seconds = ensure_instance_stopped(instance_client, project_id, zone, instance_name)
             except Exception as e:
                 had_exception = True
-                stats.exception_count += 1
-                stats.last_error = summarize_exception(e)
+                exception_kind, summarized_error = record_reroll_exception(stats, e)
                 stats.last_updated = time.time()
-                remember_recent(stats.recent_errors, stats.last_error, limit=5)
                 save_json_state(state_path, stats.to_dict())
-                print_warning(f"本轮尝试遇到异常，将自动恢复后继续: {summarize_exception(e)}")
+                print_warning(
+                    f"本轮尝试遇到{format_exception_kind_label(exception_kind)}，将自动恢复后继续: "
+                    f"{summarized_error}"
+                )
                 print_reroll_progress(stats, state_path)
 
             attempt_counter += 1
             cooldown_base, cooldown_reason = get_reroll_cooldown_policy(
                 had_exception=had_exception,
                 stop_wait_seconds=stop_wait_seconds,
+                exception_kind=exception_kind,
+                consecutive_oauth_timeouts=stats.consecutive_oauth_timeouts,
             )
             cooldown = apply_jitter(
                 cooldown_base,

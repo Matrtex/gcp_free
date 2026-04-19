@@ -90,6 +90,11 @@ class RerollStats:
     start_time: float
     attempts: int = 0
     exception_count: int = 0
+    oauth_timeout_count: int = 0
+    compute_timeout_count: int = 0
+    instance_stuck_count: int = 0
+    hard_failure_count: int = 0
+    consecutive_oauth_timeouts: int = 0
     cpu_counter: Dict[str, int] = field(default_factory=dict)
     recent_results: List[str] = field(default_factory=list)
     recent_errors: List[str] = field(default_factory=list)
@@ -107,6 +112,11 @@ class RerollStats:
             start_time=float(data.get("start_time") or 0),
             attempts=int(data.get("attempts") or 0),
             exception_count=int(data.get("exception_count") or 0),
+            oauth_timeout_count=int(data.get("oauth_timeout_count") or 0),
+            compute_timeout_count=int(data.get("compute_timeout_count") or 0),
+            instance_stuck_count=int(data.get("instance_stuck_count") or 0),
+            hard_failure_count=int(data.get("hard_failure_count") or 0),
+            consecutive_oauth_timeouts=int(data.get("consecutive_oauth_timeouts") or 0),
             cpu_counter=dict(data.get("cpu_counter") or {}),
             recent_results=list(data.get("recent_results") or []),
             recent_errors=list(data.get("recent_errors") or []),
@@ -124,6 +134,11 @@ class RerollStats:
             "start_time": self.start_time,
             "attempts": self.attempts,
             "exception_count": self.exception_count,
+            "oauth_timeout_count": self.oauth_timeout_count,
+            "compute_timeout_count": self.compute_timeout_count,
+            "instance_stuck_count": self.instance_stuck_count,
+            "hard_failure_count": self.hard_failure_count,
+            "consecutive_oauth_timeouts": self.consecutive_oauth_timeouts,
             "cpu_counter": dict(self.cpu_counter),
             "recent_results": list(self.recent_results),
             "recent_errors": list(self.recent_errors),

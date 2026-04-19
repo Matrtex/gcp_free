@@ -6,15 +6,19 @@ from unittest.mock import patch
 import subprocess
 
 from gcp import (
+    classify_reroll_exception,
     find_instance_by_name,
     ensure_instance_running,
     get_instance_cache_key,
+    get_oauth_circuit_breaker_cooldown,
     get_instance_with_retry,
     get_reroll_cooldown_policy,
+    get_soft_exception_count,
     is_transient_gcp_error,
     is_reroll_state_compatible,
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
+    record_reroll_exception,
     resolve_os_config,
     summarize_text_block,
     warn_if_long_pause,
@@ -91,6 +95,21 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(cooldown, 6)
         self.assertIn("异常", reason)
 
+    def test_get_reroll_cooldown_policy_triggers_oauth_circuit_breaker(self):
+        cooldown, reason = get_reroll_cooldown_policy(
+            had_exception=True,
+            stop_wait_seconds=0,
+            exception_kind="oauth_timeout",
+            consecutive_oauth_timeouts=4,
+        )
+        self.assertEqual(cooldown, 90)
+        self.assertIn("熔断", reason)
+
+    def test_get_oauth_circuit_breaker_cooldown_caps_at_maximum(self):
+        self.assertEqual(get_oauth_circuit_breaker_cooldown(2), 0)
+        self.assertEqual(get_oauth_circuit_breaker_cooldown(3), 60)
+        self.assertEqual(get_oauth_circuit_breaker_cooldown(7), 180)
+
     def test_is_transient_gcp_error_recognizes_https_connection_pool_message(self):
         exc = RuntimeError(
             "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
@@ -98,6 +117,57 @@ class GcpHelpersTestCase(unittest.TestCase):
             "Max retries exceeded with url: /compute/v1/projects/demo/zones/us-west1-a/instances/vm-1"
         )
         self.assertTrue(is_transient_gcp_error(exc))
+
+    def test_classify_reroll_exception_distinguishes_oauth_and_instance_stuck(self):
+        oauth_exc = RuntimeError(
+            "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+            "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
+        )
+        stop_exc = TimeoutError("等待虚拟机 vm-1 关停超时，最后状态: STOPPING")
+        compute_exc = RuntimeError(
+            "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+            "HTTPSConnectionPool(host='compute.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
+        )
+        hard_exc = RuntimeError("permission denied")
+
+        self.assertEqual(classify_reroll_exception(oauth_exc), "oauth_timeout")
+        self.assertEqual(classify_reroll_exception(stop_exc), "instance_stuck")
+        self.assertEqual(classify_reroll_exception(compute_exc), "compute_timeout")
+        self.assertEqual(classify_reroll_exception(hard_exc), "hard_failure")
+
+    def test_record_reroll_exception_tracks_soft_and_hard_counters(self):
+        stats = RerollStats(
+            project_id="demo-project",
+            instance_name="vm-1",
+            zone="us-west1-a",
+            start_time=123.0,
+        )
+
+        oauth_kind, _ = record_reroll_exception(
+            stats,
+            RuntimeError(
+                "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+                "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
+            ),
+        )
+        compute_kind, _ = record_reroll_exception(
+            stats,
+            RuntimeError(
+                "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
+                "HTTPSConnectionPool(host='compute.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
+            ),
+        )
+        hard_kind, _ = record_reroll_exception(stats, RuntimeError("permission denied"))
+
+        self.assertEqual(oauth_kind, "oauth_timeout")
+        self.assertEqual(compute_kind, "compute_timeout")
+        self.assertEqual(hard_kind, "hard_failure")
+        self.assertEqual(stats.oauth_timeout_count, 1)
+        self.assertEqual(stats.compute_timeout_count, 1)
+        self.assertEqual(stats.hard_failure_count, 1)
+        self.assertEqual(get_soft_exception_count(stats), 2)
+        self.assertEqual(stats.exception_count, 3)
+        self.assertEqual(stats.consecutive_oauth_timeouts, 0)
 
     @patch("gcp.time.sleep", return_value=None)
     @patch("gcp.get_instance_with_retry")

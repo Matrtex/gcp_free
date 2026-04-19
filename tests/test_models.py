@@ -35,6 +35,7 @@ class ModelsTestCase(unittest.TestCase):
         payload = stats.to_dict()
         self.assertEqual(payload["cpu_counter"]["AMD EPYC Milan"], 2)
         self.assertEqual(payload["last_cpu"], "AMD EPYC Milan")
+        self.assertEqual(payload["oauth_timeout_count"], 0)
 
     def test_reroll_stats_roundtrip(self):
         stats = RerollStats(
@@ -44,6 +45,11 @@ class ModelsTestCase(unittest.TestCase):
             start_time=123.0,
             attempts=9,
             exception_count=2,
+            oauth_timeout_count=1,
+            compute_timeout_count=0,
+            instance_stuck_count=1,
+            hard_failure_count=0,
+            consecutive_oauth_timeouts=0,
             success_cpu="AMD EPYC Milan",
             last_cpu="AMD EPYC Milan",
             last_error="timeout",
