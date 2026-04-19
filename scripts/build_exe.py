@@ -30,7 +30,10 @@ def parse_args():
     parser.add_argument("--version", help="发布版本号，例如 v1.2.3", default="")
     parser.add_argument("--name", help="生成的 exe 名称", default="gcp_free")
     parser.add_argument("--clean", action="store_true", help="构建前清理 build/dist 目录")
-    parser.add_argument("--onefile", action="store_true", default=True, help="生成单文件 exe")
+    package_mode = parser.add_mutually_exclusive_group()
+    package_mode.add_argument("--onefile", dest="onefile", action="store_true", help="生成单文件 exe（默认）")
+    package_mode.add_argument("--onedir", dest="onefile", action="store_false", help="生成目录模式 exe")
+    parser.set_defaults(onefile=True)
     parser.add_argument("--sign-pfx", help="可选，PFX 证书路径")
     parser.add_argument("--sign-password", help="可选，PFX 证书密码", default="")
     parser.add_argument(

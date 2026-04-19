@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from typing import Optional
 
 # 远程脚本映射：CLI 和菜单都通过这个表选择本地脚本文件。
 LOCAL_SCRIPT_FILES = {
@@ -8,6 +9,9 @@ LOCAL_SCRIPT_FILES = {
     "net_iptables": "net_iptables.sh",
     "net_shutdown": "net_shutdown.sh",
 }
+
+# 流量监控默认限额，单位 GB；远程上传脚本前会用这个值覆盖脚本里的兜底默认值。
+TRAFFIC_LIMIT_GB = 180
 
 # 删除免费资源时顺带清理的防火墙规则名。
 FIREWALL_RULES_TO_CLEAN = [
@@ -115,32 +119,32 @@ DEFAULT_COMPUTE_TRANSPORT = "rest"
 DEFAULT_RESOURCEMANAGER_TRANSPORT = "rest"
 
 
-def get_region_config(region):
+def get_region_config(region: str) -> Optional[dict]:
     for config in REGION_OPTIONS:
         if config["region"] == region:
             return config
     return None
 
 
-def resolve_project_path(root_dir, *parts):
+def resolve_project_path(root_dir: Path | str, *parts: str) -> Path:
     return Path(root_dir, *parts)
 
 
-def get_bundle_root():
+def get_bundle_root() -> Path:
     # PyInstaller onefile 运行时，静态资源会先解包到 _MEIPASS。
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)
     return Path(__file__).resolve().parent
 
 
-def get_runtime_root():
+def get_runtime_root() -> Path:
     # 日志、状态文件和用户可覆盖的配置，统一落在 exe 所在目录。
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-def resolve_asset_path(*parts):
+def resolve_asset_path(*parts: str) -> Path:
     # 优先读取 exe 同目录下的外部资源，便于用户直接替换模板或配置。
     runtime_path = get_runtime_root().joinpath(*parts)
     if runtime_path.exists():

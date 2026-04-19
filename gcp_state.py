@@ -1,13 +1,14 @@
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 
-def ensure_parent_dir(path):
+def ensure_parent_dir(path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def load_json_state(path, default=None):
+def load_json_state(path: str | Path, default: Any = None) -> Any:
     target = Path(path)
     if not target.exists():
         return default
@@ -18,7 +19,7 @@ def load_json_state(path, default=None):
         return default
 
 
-def save_json_state(path, payload):
+def save_json_state(path: str | Path, payload: dict[str, Any]) -> None:
     ensure_parent_dir(path)
     data = dict(payload)
     data.setdefault("saved_at", time.time())

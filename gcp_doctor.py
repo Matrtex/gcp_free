@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional, Sequence, Tuple
 
 from gcp_config import LOCAL_SCRIPT_FILES, LOG_DIR_NAME, STATE_DIR_NAME
 from gcp_models import DoctorCheck
@@ -18,21 +19,21 @@ OPTIONAL_LOCAL_FILES = (
 )
 
 
-def find_gcloud_command():
+def find_gcloud_command() -> Optional[str]:
     command = os.getenv(GCLOUD_COMMAND_ENV, "").strip()
     if command:
         return command
     return shutil.which("gcloud")
 
 
-def find_python_command():
+def find_python_command() -> Optional[str]:
     command = (sys.executable or "").strip()
     if command and Path(command).exists():
         return command
     return shutil.which("python") or shutil.which("python3")
 
 
-def _run_command(cmd, timeout=30):
+def _run_command(cmd: Sequence[str], timeout: int = 30) -> Tuple[bool, str, str]:
     try:
         result = subprocess.run(
             cmd,
@@ -48,7 +49,7 @@ def _run_command(cmd, timeout=30):
         return False, "", str(exc)
 
 
-def get_active_gcloud_account(gcloud_path):
+def get_active_gcloud_account(gcloud_path: str) -> Tuple[str, str]:
     ok, stdout, stderr = _run_command(
         [
             gcloud_path,
@@ -70,7 +71,7 @@ def get_active_gcloud_account(gcloud_path):
     return "", stderr or fallback_stderr or "无法确认 gcloud 登录状态"
 
 
-def get_current_gcloud_project(gcloud_path):
+def get_current_gcloud_project(gcloud_path: str) -> Tuple[str, str]:
     ok, stdout, stderr = _run_command([gcloud_path, "config", "get-value", "project"])
     project_id = (stdout or "").strip()
     if ok and project_id and project_id != "(unset)":
@@ -78,7 +79,7 @@ def get_current_gcloud_project(gcloud_path):
     return "", stderr or "未设置默认项目"
 
 
-def is_directory_writable(path):
+def is_directory_writable(path: Path | str) -> Tuple[bool, str]:
     target_dir = Path(path)
     target_dir.mkdir(parents=True, exist_ok=True)
     temp_file = target_dir / ".doctor_write_test"
@@ -90,7 +91,7 @@ def is_directory_writable(path):
         return False, f"目录不可写: {target_dir} ({exc})"
 
 
-def collect_workspace_checks(workspace_dir):
+def collect_workspace_checks(workspace_dir: Path) -> list[DoctorCheck]:
     checks = []
     scripts_dir = workspace_dir / "scripts"
     missing_scripts = [
@@ -117,7 +118,7 @@ def collect_workspace_checks(workspace_dir):
     return checks
 
 
-def get_enabled_gcp_services(gcloud_path, project_id):
+def get_enabled_gcp_services(gcloud_path: str, project_id: str) -> Tuple[set[str], list[str]]:
     enabled_services = set()
     errors = []
     for service_name in REQUIRED_GCP_SERVICES:
@@ -143,7 +144,7 @@ def get_enabled_gcp_services(gcloud_path, project_id):
     return enabled_services, errors
 
 
-def run_doctor(requirements_file, project_id=None):
+def run_doctor(requirements_file: str | Path, project_id: Optional[str] = None) -> list[DoctorCheck]:
     requirements_path = Path(requirements_file)
     workspace_dir = requirements_path.parent
     checks = []

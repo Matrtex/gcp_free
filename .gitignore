@@ -6,5 +6,10 @@
 .gcp_free_state/
 __pycache__/
 tests/__pycache__/
+*.pyc
+*.spec
+.mypy_cache/
+.ruff_cache/
 build/
 dist/
+config.dae

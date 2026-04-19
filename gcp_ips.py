@@ -1,39 +1,60 @@
-import requests
 import ipaddress
+import json
+import urllib.request
+from typing import Any, Sequence
 
-def get_gcp_ips_merged():
-    url = "https://www.gstatic.com/ipranges/cloud.json"
-    
-    # 俄勒冈 (us-west1), 爱荷华 (us-central1), 南卡罗来纳 (us-east1)
-    target_regions = {"us-west1", "us-central1", "us-east1"}
-    
-    print(f"正在获取并计算合并 IP 段...")
-    
-    try:
-        response = requests.get(url)
-        data = response.json()
-        
-        # 1. 收集所有目标区域的 IPv4 对象
-        networks = []
-        for prefix in data.get("prefixes", []):
-            if prefix.get("scope") in target_regions:
-                if "ipv4Prefix" in prefix:
-                    # 将字符串转换为 IPv4Network 对象
-                    net = ipaddress.IPv4Network(prefix["ipv4Prefix"])
-                    networks.append(net)
-        
-        # 2. 核心步骤：合并相邻网段 (collapse_addresses)
-        # 这个函数会自动去重，并将相邻/包含的网段合并为最大的 CIDR
-        merged_networks = list(ipaddress.collapse_addresses(networks))
-        
-        print(f"原始段数: {len(networks)} -> 合并后段数: {len(merged_networks)}\n")
-        
-        # 3. 输出结果
-        for net in merged_networks:
-            print(str(net))
 
-    except Exception as e:
-        print(f"发生错误: {e}")
+GCP_IP_RANGES_URL = "https://www.gstatic.com/ipranges/cloud.json"
+DEFAULT_TARGET_REGIONS = ("us-west1", "us-central1", "us-east1")
+
+
+def fetch_gcp_ip_ranges(url: str = GCP_IP_RANGES_URL, timeout: int = 20) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def merge_gcp_ipv4_ranges(
+    data: dict[str, Any],
+    target_regions: Sequence[str] = DEFAULT_TARGET_REGIONS,
+) -> list[str]:
+    target_region_set = set(target_regions)
+    networks = []
+    for prefix in data.get("prefixes", []):
+        if prefix.get("scope") not in target_region_set:
+            continue
+        ipv4_prefix = prefix.get("ipv4Prefix")
+        if ipv4_prefix:
+            networks.append(ipaddress.IPv4Network(ipv4_prefix))
+    return [str(network) for network in ipaddress.collapse_addresses(networks)]
+
+
+def get_gcp_ips_merged(
+    target_regions: Sequence[str] = DEFAULT_TARGET_REGIONS,
+    url: str = GCP_IP_RANGES_URL,
+    timeout: int = 20,
+) -> list[str]:
+    data = fetch_gcp_ip_ranges(url=url, timeout=timeout)
+    return merge_gcp_ipv4_ranges(data, target_regions=target_regions)
+
+
+def update_cdnip_file(
+    output_path: str = "cdnip.txt",
+    target_regions: Sequence[str] = DEFAULT_TARGET_REGIONS,
+) -> list[str]:
+    merged_ranges = get_gcp_ips_merged(target_regions=target_regions)
+    with open(output_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(merged_ranges))
+        fh.write("\n")
+    return merged_ranges
+
+
+def main() -> None:
+    print("正在获取并计算合并 IP 段...")
+    merged_ranges = get_gcp_ips_merged()
+    print(f"合并后段数: {len(merged_ranges)}\n")
+    for network in merged_ranges:
+        print(network)
+
 
 if __name__ == "__main__":
-    get_gcp_ips_merged()
+    main()

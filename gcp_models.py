@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -13,7 +15,7 @@ class InstanceInfo:
     external_ip: str
 
     @classmethod
-    def from_api_instance(cls, instance, zone):
+    def from_api_instance(cls: type["InstanceInfo"], instance: Any, zone: str) -> "InstanceInfo":
         network = None
         internal_ip = "-"
         external_ip = "-"
@@ -34,7 +36,7 @@ class InstanceInfo:
         )
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls: type["InstanceInfo"], data: Dict[str, Any]) -> "InstanceInfo":
         return cls(
             name=data["name"],
             zone=data["zone"],
@@ -45,7 +47,7 @@ class InstanceInfo:
             external_ip=data.get("external_ip", "-"),
         )
 
-    def to_dict(self):
+    def to_dict(self: "InstanceInfo") -> Dict[str, Any]:
         return {
             "name": self.name,
             "zone": self.zone,
@@ -65,7 +67,7 @@ class RemoteConfig:
     key: str = ""
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls: type["RemoteConfig"], data: Dict[str, Any]) -> "RemoteConfig":
         return cls(
             method=data["method"],
             user=data.get("user", ""),
@@ -73,7 +75,7 @@ class RemoteConfig:
             key=data.get("key", ""),
         )
 
-    def to_dict(self):
+    def to_dict(self: "RemoteConfig") -> Dict[str, Any]:
         return {
             "method": self.method,
             "user": self.user,
@@ -104,7 +106,7 @@ class RerollStats:
     last_updated: Optional[float] = None
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls: type["RerollStats"], data: Dict[str, Any]) -> "RerollStats":
         return cls(
             project_id=data["project_id"],
             instance_name=data["instance_name"],
@@ -126,7 +128,7 @@ class RerollStats:
             last_updated=data.get("last_updated"),
         )
 
-    def to_dict(self):
+    def to_dict(self: "RerollStats") -> Dict[str, Any]:
         return {
             "project_id": self.project_id,
             "instance_name": self.instance_name,
@@ -162,7 +164,8 @@ class ActionSpec:
     menu_label: str
     cli_name: Optional[str]
     description: str
-    handler_name: str
+    menu_handler: Optional[Callable[[Any], Any]] = None
+    cli_handler: Optional[Callable[[Any], Any]] = None
 
 
 @dataclass

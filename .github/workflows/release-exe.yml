@@ -146,7 +146,7 @@ jobs:
 
       - name: 运行测试
         run: |
-          python -m py_compile gcp.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_logging.py gcp_models.py gcp_state.py scripts/build_exe.py
+          python -m py_compile gcp.py gcp_app.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_firewall.py gcp_instance.py gcp_ips.py gcp_logging.py gcp_menu.py gcp_models.py gcp_operations.py gcp_remote.py gcp_reroll.py gcp_state.py gcp_utils.py scripts/build_exe.py
           python -m unittest discover -s tests -v
 
       - name: 计算构建版本

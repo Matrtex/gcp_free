@@ -14,6 +14,7 @@ from gcp import (
     get_instance_with_retry,
     get_reroll_cooldown_policy,
     get_soft_exception_count,
+    handle_setup_cli,
     is_transient_gcp_error,
     is_reroll_state_compatible,
     list_instances_via_gcloud,
@@ -169,8 +170,8 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(stats.exception_count, 3)
         self.assertEqual(stats.consecutive_oauth_timeouts, 0)
 
-    @patch("gcp.time.sleep", return_value=None)
-    @patch("gcp.get_instance_with_retry")
+    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_change_returns_as_soon_as_status_changes(self, mock_get_instance, _mock_sleep):
         mock_get_instance.side_effect = [
             SimpleNamespace(status="STOPPED"),
@@ -190,11 +191,11 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(status, "PROVISIONING")
         self.assertEqual(instance.status, "PROVISIONING")
 
-    @patch("gcp.print_info")
-    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp.time.sleep", return_value=None)
-    @patch("gcp.time.time")
-    @patch("gcp.get_instance_with_retry")
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.time.time")
+    @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_emits_heartbeat_when_status_stays_unchanged(
         self,
         mock_get_instance,
@@ -227,10 +228,10 @@ class GcpHelpersTestCase(unittest.TestCase):
             any("实例仍为 STOPPING" in args[0] for args, _kwargs in mock_print_info.call_args_list)
         )
 
-    @patch("gcp.print_warning")
-    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp.time.sleep", return_value=None)
-    @patch("gcp.get_instance_with_retry")
+    @patch("gcp_instance.print_warning")
+    @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_continues_after_transient_network_error(
         self,
         mock_get_instance,
@@ -265,11 +266,11 @@ class GcpHelpersTestCase(unittest.TestCase):
             any("临时网络错误" in args[0] for args, _kwargs in mock_print_warning.call_args_list)
         )
 
-    @patch("gcp.print_info")
-    @patch("gcp.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp.time.sleep", return_value=None)
-    @patch("gcp.time.time")
-    @patch("gcp.get_instance_with_retry")
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
+    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.time.time")
+    @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_change_emits_heartbeat_when_status_stays_unchanged(
         self,
         mock_get_instance,
@@ -302,11 +303,11 @@ class GcpHelpersTestCase(unittest.TestCase):
             any("实例仍为 RUNNING" in args[0] for args, _kwargs in mock_print_info.call_args_list)
         )
 
-    @patch("gcp.wait_for_instance_status")
-    @patch("gcp.wait_for_operation")
-    @patch("gcp.wait_for_instance_status_change")
-    @patch("gcp.start_instance_with_retry")
-    @patch("gcp.get_instance_with_retry")
+    @patch("gcp_instance.wait_for_instance_status")
+    @patch("gcp_instance.wait_for_operation")
+    @patch("gcp_instance.wait_for_instance_status_change")
+    @patch("gcp_instance.start_instance_with_retry")
+    @patch("gcp_instance.get_instance_with_retry")
     def test_ensure_instance_running_skips_operation_wait_when_instance_reaches_running_fast(
         self,
         mock_get_instance,
@@ -330,8 +331,8 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_wait_operation.assert_not_called()
         mock_wait_for_instance_status.assert_not_called()
 
-    @patch("gcp.find_gcloud_command", return_value="gcloud")
-    @patch("gcp.subprocess.run")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
     def test_list_instances_via_gcloud_parses_core_fields(self, mock_run, _mock_find_gcloud):
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -352,8 +353,8 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(instances[0].zone, "us-west1-a")
         self.assertEqual(instances[0].external_ip, "35.1.2.3")
 
-    @patch("gcp.list_instances")
-    @patch("gcp.get_instance_by_name_with_zone")
+    @patch("gcp_instance.list_instances")
+    @patch("gcp_instance.get_instance_by_name_with_zone")
     def test_find_instance_by_name_uses_direct_get_when_zone_is_provided(
         self,
         mock_get_instance_by_zone,
@@ -388,8 +389,85 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertEqual(result.kwargs["timeout"], 10)
 
-    @patch("gcp.print_warning")
-    @patch("gcp.time.time", side_effect=[65, 65])
+    @patch("gcp_cli.run_setup_remote_step", side_effect=lambda _args, inst, _remote, _name, _action: inst)
+    @patch("gcp_cli.build_remote_config_from_args", return_value=SimpleNamespace(method="gcloud"))
+    @patch("gcp_cli.configure_firewall_non_interactive")
+    @patch("gcp_cli.reroll_cpu_loop")
+    @patch("gcp_cli.create_instance")
+    def test_handle_setup_cli_skip_reroll_does_not_call_reroll(
+        self,
+        mock_create_instance,
+        mock_reroll_cpu_loop,
+        _mock_configure_firewall,
+        _mock_build_remote_config,
+        mock_run_setup_remote_step,
+    ):
+        mock_create_instance.return_value = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        args = SimpleNamespace(
+            project_id="demo-project",
+            zone="us-west1-a",
+            region="us-west1",
+            os="debian-12",
+            instance_name="vm-1",
+            skip_reroll=True,
+            traffic_script="net_iptables",
+            dry_run=False,
+        )
+
+        handle_setup_cli(args)
+
+        mock_reroll_cpu_loop.assert_not_called()
+        self.assertEqual(mock_run_setup_remote_step.call_count, 4)
+
+    @patch("gcp_cli.run_setup_remote_step", side_effect=lambda _args, inst, _remote, _name, _action: inst)
+    @patch("gcp_cli.build_remote_config_from_args", return_value=SimpleNamespace(method="gcloud"))
+    @patch("gcp_cli.configure_firewall_non_interactive")
+    @patch("gcp_cli.reroll_cpu_loop")
+    @patch("gcp_cli.create_instance")
+    def test_handle_setup_cli_default_calls_reroll(
+        self,
+        mock_create_instance,
+        mock_reroll_cpu_loop,
+        _mock_configure_firewall,
+        _mock_build_remote_config,
+        _mock_run_setup_remote_step,
+    ):
+        instance = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_create_instance.return_value = instance
+        mock_reroll_cpu_loop.return_value = instance
+        args = SimpleNamespace(
+            project_id="demo-project",
+            zone="us-west1-a",
+            region="us-west1",
+            os="debian-12",
+            instance_name="vm-1",
+            skip_reroll=False,
+            traffic_script="net_iptables",
+            dry_run=False,
+        )
+
+        handle_setup_cli(args)
+
+        mock_reroll_cpu_loop.assert_called_once()
+
+    @patch("gcp_utils.print_warning")
+    @patch("gcp_utils.time.time", side_effect=[65, 65])
     def test_warn_if_long_pause_emits_clear_warning(self, _mock_time, mock_print_warning):
         current_time = warn_if_long_pause(0, "等待实例 vm-1 进入 STOPPED")
         self.assertEqual(current_time, 65)
