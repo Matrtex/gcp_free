@@ -123,17 +123,25 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: 准备代码签名证书
-        if: secrets.WINDOWS_CODESIGN_CERT_BASE64 != '' && secrets.WINDOWS_CODESIGN_CERT_PASSWORD != ''
         shell: pwsh
+        env:
+          WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
+          WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
+          WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PASSWORD)) {
+            Write-Host "未配置代码签名证书，跳过签名准备。"
+            exit 0
+          }
+
           $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}"))
-          $timestampUrl = "${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
+          $timestampUrl = $env:WINDOWS_CODESIGN_TIMESTAMP_URL
           if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
             $timestampUrl = "http://timestamp.digicert.com"
           }
           "SIGN_PFX_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "SIGN_PFX_PASSWORD=${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGN_PFX_PASSWORD=$env:WINDOWS_CODESIGN_CERT_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SIGN_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: 运行测试
