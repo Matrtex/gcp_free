@@ -149,8 +149,8 @@ jobs:
           $createRelease = "${{ inputs.create_release }}"
           $draftRelease = "${{ inputs.draft }}"
           $releaseNotes = @"
-${{ inputs.release_notes }}
-"@
+          ${{ inputs.release_notes }}
+          "@
 
           if ($eventName -eq "push") {
             $version = "${{ github.ref_name }}"
