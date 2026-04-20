@@ -10,6 +10,8 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONWARNINGS: ignore::FutureWarning:google.api_core._python_version_support
     strategy:
       fail-fast: false
       matrix:

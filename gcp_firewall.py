@@ -53,8 +53,8 @@ def resolve_cdn_ip_path(filename: Any="cdnip.txt") -> Any:
 def read_cdn_ips(filename: Any="cdnip.txt") -> Any:
     resolved_filename = resolve_cdn_ip_path(filename)
     if not os.path.exists(resolved_filename):
-        print(f"【错误】找不到文件: {resolved_filename}")
-        print("请在脚本同目录下创建该文件，并填入IP段。")
+        print_warning(f"找不到文件: {resolved_filename}")
+        print_warning("请在脚本同目录下创建该文件，并填入 IP 段。")
         return []
 
     ip_list = []
@@ -65,7 +65,7 @@ def read_cdn_ips(filename: Any="cdnip.txt") -> Any:
                 ip = clean_line.split()[0]
                 ip_list.append(ip)
 
-    print(f"已从 {resolved_filename} 读取到 {len(ip_list)} 个 IP 段。")
+    print_info(f"已从 {resolved_filename} 读取到 {len(ip_list)} 个 IP 段。")
     return ip_list
 
 def set_protocol_field(config_object: Any,  value: Any) -> Any:
@@ -75,15 +75,15 @@ def set_protocol_field(config_object: Any,  value: Any) -> Any:
         try:
             config_object.I_p_protocol = value
         except AttributeError:
-            print(f"\n【调试信息】无法设置协议字段。对象 '{type(config_object).__name__}' 的有效属性如下:")
-            print([d for d in dir(config_object) if not d.startswith("_")])
+            print_warning(f"无法设置协议字段。对象 '{type(config_object).__name__}' 的有效属性如下:")
+            print_warning(str([d for d in dir(config_object) if not d.startswith("_")]))
             raise
 
 def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
     rule_name = "allow-all-ingress-custom"
 
-    print(f"\n正在创建入站规则: {rule_name} ...")
+    print_info(f"正在创建入站规则: {rule_name} ...")
 
     firewall_rule = compute_v1.Firewall()
     firewall_rule.name = rule_name
@@ -98,7 +98,7 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
 
     try:
         operation = insert_firewall_with_retry(firewall_client, project_id, firewall_rule)
-        print("正在应用规则...")
+        print_info("正在应用规则...")
         wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success("已添加允许所有入站连接的规则。")
         return True
@@ -113,13 +113,13 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
 
 def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
     if not ip_ranges:
-        print("IP 列表为空，跳过创建拒绝规则。")
+        print_info("IP 列表为空，跳过创建拒绝规则。")
         return True
 
     firewall_client = firewalls_client()
     rule_name = "deny-cdn-egress-custom"
 
-    print(f"\n正在创建出站拒绝规则: {rule_name} ...")
+    print_info(f"正在创建出站拒绝规则: {rule_name} ...")
 
     firewall_rule = compute_v1.Firewall()
     firewall_rule.name = rule_name
@@ -134,7 +134,7 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
 
     try:
         operation = insert_firewall_with_retry(firewall_client, project_id, firewall_rule)
-        print("正在应用规则...")
+        print_info("正在应用规则...")
         wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success(f"已添加拒绝规则，共拦截 {len(ip_ranges)} 个 IP 段。")
         return True
@@ -148,62 +148,58 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
             return False
 
 def configure_firewall(project_id: Any,  network: Any) -> Any:
-    print("\n------------------------------------------------")
-    print("防火墙规则管理菜单")
-    print("------------------------------------------------")
-    print(f"目标网络: {network}")
+    print_info("防火墙规则管理菜单")
+    print_info(f"目标网络: {network}")
 
     choice_in = input("\n[1/2] 是否添加【允许所有入站连接 (0.0.0.0/0)】规则? (y/n): ").strip().lower()
     if choice_in == "y":
         add_allow_all_ingress(project_id, network)
     else:
-        print("已跳过入站规则配置。")
+        print_info("已跳过入站规则配置。")
 
     choice_out = input("\n[2/2] 是否添加【拒绝对 cdnip.txt 中 IP 的出站连接】规则? (y/n): ").strip().lower()
     if choice_out == "y":
         ips = read_cdn_ips()
         if ips:
             if len(ips) > 256:
-                print(f"【警告】IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
-                print("脚本将只取前 256 个 IP。")
+                print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
+                print_warning("脚本将只取前 256 个 IP。")
                 ips = ips[:256]
 
             add_deny_cdn_egress(project_id, ips, network)
     else:
-        print("已跳过出站规则配置。")
+        print_info("已跳过出站规则配置。")
 
-    print("\n所有操作完成。")
+    print_info("所有操作完成。")
 
 def configure_firewall_non_interactive( project_id: Any,  network: Any,  allow_all_ingress: Any=False,  deny_cdn_egress: Any=False,  cdnip_filename: Any="cdnip.txt",  ) -> Any:
     if not allow_all_ingress and not deny_cdn_egress:
         raise ValueError("非交互防火墙模式至少要指定 --allow-all-ingress 或 --deny-cdn-egress。")
 
-    print("\n------------------------------------------------")
-    print("防火墙规则管理（非交互模式）")
-    print("------------------------------------------------")
-    print(f"目标网络: {network}")
+    print_info("防火墙规则管理（非交互模式）")
+    print_info(f"目标网络: {network}")
     all_ok = True
 
     if allow_all_ingress:
         all_ok = add_allow_all_ingress(project_id, network) and all_ok
     else:
-        print("已跳过入站规则配置。")
+        print_info("已跳过入站规则配置。")
 
     if deny_cdn_egress:
         ips = read_cdn_ips(cdnip_filename)
         if ips:
             if len(ips) > 256:
-                print(f"【警告】IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
-                print("脚本将只取前 256 个 IP。")
+                print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
+                print_warning("脚本将只取前 256 个 IP。")
                 ips = ips[:256]
             all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
     else:
-        print("已跳过出站规则配置。")
+        print_info("已跳过出站规则配置。")
 
     if not all_ok:
         raise RuntimeError("非交互防火墙规则配置失败，已停止后续流程。")
 
-    print("\n所有操作完成。")
+    print_info("所有操作完成。")
 
 def delete_firewall_rule(project_id: Any,  rule_name: Any) -> Any:
     firewall_client = firewalls_client()
@@ -241,15 +237,14 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
     instance_name = instance_info.name
     zone = instance_info.zone
 
-    print("\n------------------------------------------------")
-    print("即将删除以下资源（可以重新创建免费资源）：")
-    print(f"- 实例: {instance_name} ({zone})")
-    print("- 相关磁盘（如仍存在）")
-    print(f"- 防火墙规则: {', '.join(FIREWALL_RULES_TO_CLEAN)}")
+    print_info("即将删除以下资源（可以重新创建免费资源）：")
+    print_info(f"- 实例: {instance_name} ({zone})")
+    print_info("- 相关磁盘（如仍存在）")
+    print_info(f"- 防火墙规则: {', '.join(FIREWALL_RULES_TO_CLEAN)}")
     if not confirmed:
         confirm = input("请输入 DELETE 确认删除: ").strip()
         if confirm != "DELETE":
-            print("已取消删除操作。")
+            print_info("已取消删除操作。")
             return False
     else:
         print_info("已通过非交互参数确认删除。")
