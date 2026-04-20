@@ -7,6 +7,7 @@ import subprocess
 
 from gcp import (
     classify_reroll_exception,
+    configure_firewall_non_interactive,
     find_instance_by_name,
     ensure_instance_running,
     get_instance_cache_key,
@@ -20,6 +21,7 @@ from gcp import (
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
     record_reroll_exception,
+    read_cdn_ips,
     resolve_os_config,
     sleep_and_detect_pause,
     summarize_text_block,
@@ -40,6 +42,29 @@ class GcpHelpersTestCase(unittest.TestCase):
         text = "a\nb\nc\nd"
         summary = summarize_text_block(text, max_lines=2, max_length=20)
         self.assertEqual(summary, "a\nb\n...")
+
+    @patch("gcp_firewall.resolve_asset_path")
+    def test_read_cdn_ips_resolves_default_file_from_runtime_assets(self, mock_resolve_asset_path):
+        with TemporaryDirectory() as tmp_dir:
+            cdnip_path = Path(tmp_dir, "cdnip.txt")
+            cdnip_path.write_text("1.1.1.0/24 comment\n\n2.2.2.0/24\n", encoding="utf-8")
+            mock_resolve_asset_path.return_value = cdnip_path
+
+            ip_ranges = read_cdn_ips()
+
+        self.assertEqual(ip_ranges, ["1.1.1.0/24", "2.2.2.0/24"])
+
+    @patch("gcp_firewall.add_allow_all_ingress", return_value=False)
+    def test_configure_firewall_non_interactive_raises_when_rule_creation_fails(
+        self,
+        _mock_add_allow_all_ingress,
+    ):
+        with self.assertRaises(RuntimeError):
+            configure_firewall_non_interactive(
+                "demo-project",
+                "global/networks/default",
+                allow_all_ingress=True,
+            )
 
     def test_instance_cache_key_uses_project_zone_and_name(self):
         instance = InstanceInfo(

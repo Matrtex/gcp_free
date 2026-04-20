@@ -9,6 +9,7 @@ from gcp_common import (
     firewalls_client,
     instances_client,
     os,
+    resolve_asset_path,
     traceback,
 )
 from gcp_operations import (
@@ -29,6 +30,7 @@ from gcp_utils import (
 )
 
 __all__ = [
+    'resolve_cdn_ip_path',
     'read_cdn_ips',
     'set_protocol_field',
     'add_allow_all_ingress',
@@ -40,21 +42,30 @@ __all__ = [
     'delete_free_resources',
 ]
 
+def resolve_cdn_ip_path(filename: Any="cdnip.txt") -> Any:
+    filename = str(filename)
+    if os.path.isabs(filename):
+        return filename
+    if filename == "cdnip.txt":
+        return str(resolve_asset_path(filename))
+    return filename
+
 def read_cdn_ips(filename: Any="cdnip.txt") -> Any:
-    if not os.path.exists(filename):
-        print(f"【错误】找不到文件: {filename}")
+    resolved_filename = resolve_cdn_ip_path(filename)
+    if not os.path.exists(resolved_filename):
+        print(f"【错误】找不到文件: {resolved_filename}")
         print("请在脚本同目录下创建该文件，并填入IP段。")
         return []
 
     ip_list = []
-    with open(filename, "r", encoding="utf-8") as f:
+    with open(resolved_filename, "r", encoding="utf-8") as f:
         for line in f:
             clean_line = line.strip()
             if clean_line:
                 ip = clean_line.split()[0]
                 ip_list.append(ip)
 
-    print(f"已从 {filename} 读取到 {len(ip_list)} 个 IP 段。")
+    print(f"已从 {resolved_filename} 读取到 {len(ip_list)} 个 IP 段。")
     return ip_list
 
 def set_protocol_field(config_object: Any,  value: Any) -> Any:
@@ -90,17 +101,20 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
         print("正在应用规则...")
         wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success("已添加允许所有入站连接的规则。")
+        return True
     except Exception as e:
         if "already exists" in str(e):
             print_warning(f"规则 {rule_name} 已存在。")
+            return True
         else:
             print_warning(f"创建防火墙规则失败: {summarize_exception(e)}")
             LOGGER.error(traceback.format_exc())
+            return False
 
 def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
     if not ip_ranges:
         print("IP 列表为空，跳过创建拒绝规则。")
-        return
+        return True
 
     firewall_client = firewalls_client()
     rule_name = "deny-cdn-egress-custom"
@@ -123,12 +137,15 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
         print("正在应用规则...")
         wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
         print_success(f"已添加拒绝规则，共拦截 {len(ip_ranges)} 个 IP 段。")
+        return True
     except Exception as e:
         if "already exists" in str(e):
             print_warning(f"规则 {rule_name} 已存在。")
+            return True
         else:
             print_warning(f"创建防火墙规则失败: {summarize_exception(e)}")
             LOGGER.error(traceback.format_exc())
+            return False
 
 def configure_firewall(project_id: Any,  network: Any) -> Any:
     print("\n------------------------------------------------")
@@ -165,9 +182,10 @@ def configure_firewall_non_interactive( project_id: Any,  network: Any,  allow_a
     print("防火墙规则管理（非交互模式）")
     print("------------------------------------------------")
     print(f"目标网络: {network}")
+    all_ok = True
 
     if allow_all_ingress:
-        add_allow_all_ingress(project_id, network)
+        all_ok = add_allow_all_ingress(project_id, network) and all_ok
     else:
         print("已跳过入站规则配置。")
 
@@ -178,9 +196,12 @@ def configure_firewall_non_interactive( project_id: Any,  network: Any,  allow_a
                 print(f"【警告】IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
                 print("脚本将只取前 256 个 IP。")
                 ips = ips[:256]
-            add_deny_cdn_egress(project_id, ips, network)
+            all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
     else:
         print("已跳过出站规则配置。")
+
+    if not all_ok:
+        raise RuntimeError("非交互防火墙规则配置失败，已停止后续流程。")
 
     print("\n所有操作完成。")
 
