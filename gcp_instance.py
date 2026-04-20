@@ -47,6 +47,7 @@ from gcp_utils import (
     prompt_manual_project_id,
     prompt_project_selection,
     select_from_list,
+    sleep_and_detect_pause,
     summarize_exception,
     summarize_text_block,
     warn_if_long_pause,
@@ -436,7 +437,7 @@ def wait_for_instance_status( instance_client: Any,  project_id: Any,  zone: Any
                 print_warning(
                     f"获取实例 {instance_name} 状态时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
                 )
-                time.sleep(poll_interval)
+                sleep_and_detect_pause(poll_interval, f"等待实例 {instance_name} 状态重试")
                 continue
             raise
         current_status = current_inst.status or "UNKNOWN"
@@ -452,7 +453,7 @@ def wait_for_instance_status( instance_client: Any,  project_id: Any,  zone: Any
             print_info(f"实例仍为 {current_status}，已等待 {waited}，继续等待进入 {target_text}...")
             last_heartbeat_time = time.time()
 
-        time.sleep(poll_interval)
+        sleep_and_detect_pause(poll_interval, f"等待实例 {instance_name} 进入 {target_text}")
 
     return None, last_status or "UNKNOWN"
 
@@ -479,7 +480,7 @@ def wait_for_instance_status_change( instance_client: Any,  project_id: Any,  zo
                 print_warning(
                     f"获取实例 {instance_name} 状态时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
                 )
-                time.sleep(poll_interval)
+                sleep_and_detect_pause(poll_interval, f"等待实例 {instance_name} 状态变化重试")
                 continue
             raise
         current_status = current_inst.status or "UNKNOWN"
@@ -495,7 +496,10 @@ def wait_for_instance_status_change( instance_client: Any,  project_id: Any,  zo
             print_info(f"实例仍为 {current_status}，已等待 {waited}，继续等待状态变化...")
             last_heartbeat_time = time.time()
 
-        time.sleep(poll_interval)
+        sleep_and_detect_pause(
+            poll_interval,
+            f"等待实例 {instance_name} 脱离 {'/'.join(sorted(from_statuses))}",
+        )
 
     return None, last_status or "UNKNOWN"
 
@@ -563,7 +567,7 @@ def wait_for_cpu_platform( instance_client: Any,  project_id: Any,  zone: Any,  
                 print_warning(
                     f"获取实例 {instance_name} CPU 信息时遇到临时网络错误，继续等待: {summarize_exception(exc)}"
                 )
-                time.sleep(poll_interval)
+                sleep_and_detect_pause(poll_interval, f"等待实例 {instance_name} CPU 信息重试")
                 continue
             raise
         last_status = current_inst.status or "UNKNOWN"
@@ -580,7 +584,7 @@ def wait_for_cpu_platform( instance_client: Any,  project_id: Any,  zone: Any,  
             else:
                 print_warning(f"实例状态暂未稳定为 RUNNING: {last_status}，继续等待 CPU 信息同步。")
 
-        time.sleep(poll_interval)
+        sleep_and_detect_pause(poll_interval, f"等待实例 {instance_name} 同步 CPU 平台")
 
     return None, last_status
 

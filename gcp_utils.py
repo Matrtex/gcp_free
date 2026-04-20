@@ -47,6 +47,7 @@ __all__ = [
     'format_seconds',
     'format_duration',
     'warn_if_long_pause',
+    'sleep_and_detect_pause',
     'get_default_log_file',
     'get_default_reroll_state_file',
     'configure_runtime_logging',
@@ -139,6 +140,21 @@ def warn_if_long_pause(last_activity_time: Any,  context: Any,  threshold: Any=L
         )
     return now
 
+def sleep_and_detect_pause(seconds: Any,  context: Any,  threshold: Any=LONG_PAUSE_WARNING_THRESHOLD) -> Any:
+    planned_seconds = max(0.0, float(seconds))
+    started_at = time.time()
+    time.sleep(planned_seconds)
+    elapsed = time.time() - started_at
+
+    if elapsed - planned_seconds >= float(threshold):
+        print_warning(
+            f"检测到本地进程可能被暂停/系统睡眠：{context} 原计划等待 "
+            f"{format_duration(planned_seconds)}，实际过去 {format_duration(elapsed)}。"
+            "常见原因是 Windows 睡眠、远程会话挂起或控制台选择模式；脚本已恢复继续运行。"
+        )
+
+    return elapsed
+
 def get_default_log_file() -> Any:
     root_dir = str(get_runtime_root())
     log_dir = os.path.join(root_dir, LOG_DIR_NAME)
@@ -178,7 +194,7 @@ def sleep_with_countdown(total_seconds: Any,  message: Any) -> Any:
         if remaining <= 0:
             break
 
-        time.sleep(min(0.2, remaining))
+        sleep_and_detect_pause(min(0.2, remaining), message)
 
 def apply_jitter(base_delay: Any,  jitter_ratio: Any=RETRY_JITTER_RATIO,  jitter_cap: Any=RETRY_JITTER_CAP) -> Any:
     if base_delay <= 0:

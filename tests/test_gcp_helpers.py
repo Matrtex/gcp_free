@@ -21,6 +21,7 @@ from gcp import (
     load_reroll_stats_from_file,
     record_reroll_exception,
     resolve_os_config,
+    sleep_and_detect_pause,
     summarize_text_block,
     warn_if_long_pause,
     wait_for_instance_status_change,
@@ -170,9 +171,13 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(stats.exception_count, 3)
         self.assertEqual(stats.consecutive_oauth_timeouts, 0)
 
-    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.sleep_and_detect_pause", return_value=0)
     @patch("gcp_instance.get_instance_with_retry")
-    def test_wait_for_instance_status_change_returns_as_soon_as_status_changes(self, mock_get_instance, _mock_sleep):
+    def test_wait_for_instance_status_change_returns_as_soon_as_status_changes(
+        self,
+        mock_get_instance,
+        _mock_sleep_and_detect_pause,
+    ):
         mock_get_instance.side_effect = [
             SimpleNamespace(status="STOPPED"),
             SimpleNamespace(status="PROVISIONING"),
@@ -193,14 +198,14 @@ class GcpHelpersTestCase(unittest.TestCase):
 
     @patch("gcp_instance.print_info")
     @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.sleep_and_detect_pause", return_value=0)
     @patch("gcp_instance.time.time")
     @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_emits_heartbeat_when_status_stays_unchanged(
         self,
         mock_get_instance,
         mock_time,
-        _mock_sleep,
+        _mock_sleep_and_detect_pause,
         _mock_warn_if_long_pause,
         mock_print_info,
     ):
@@ -230,12 +235,12 @@ class GcpHelpersTestCase(unittest.TestCase):
 
     @patch("gcp_instance.print_warning")
     @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.sleep_and_detect_pause", return_value=0)
     @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_continues_after_transient_network_error(
         self,
         mock_get_instance,
-        _mock_sleep,
+        _mock_sleep_and_detect_pause,
         _mock_warn_if_long_pause,
         mock_print_warning,
     ):
@@ -268,14 +273,14 @@ class GcpHelpersTestCase(unittest.TestCase):
 
     @patch("gcp_instance.print_info")
     @patch("gcp_instance.warn_if_long_pause", side_effect=lambda last, *_args, **_kwargs: last)
-    @patch("gcp_instance.time.sleep", return_value=None)
+    @patch("gcp_instance.sleep_and_detect_pause", return_value=0)
     @patch("gcp_instance.time.time")
     @patch("gcp_instance.get_instance_with_retry")
     def test_wait_for_instance_status_change_emits_heartbeat_when_status_stays_unchanged(
         self,
         mock_get_instance,
         mock_time,
-        _mock_sleep,
+        _mock_sleep_and_detect_pause,
         _mock_warn_if_long_pause,
         mock_print_info,
     ):
@@ -473,6 +478,22 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(current_time, 65)
         self.assertTrue(
             any("检测到长时间挂起/冻结" in args[0] for args, _kwargs in mock_print_warning.call_args_list)
+        )
+
+    @patch("gcp_utils.print_warning")
+    @patch("gcp_utils.time.sleep", return_value=None)
+    @patch("gcp_utils.time.time", side_effect=[100, 200])
+    def test_sleep_and_detect_pause_emits_warning_when_sleep_is_suspended(
+        self,
+        _mock_time,
+        _mock_sleep,
+        mock_print_warning,
+    ):
+        elapsed = sleep_and_detect_pause(1, "等待实例 vm-1 进入 STOPPED", threshold=30)
+
+        self.assertEqual(elapsed, 100)
+        self.assertTrue(
+            any("检测到本地进程可能被暂停/系统睡眠" in args[0] for args, _kwargs in mock_print_warning.call_args_list)
         )
 
 

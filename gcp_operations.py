@@ -25,6 +25,7 @@ from gcp_utils import (
     format_seconds,
     print_info,
     print_warning,
+    sleep_and_detect_pause,
     summarize_exception,
     warn_if_long_pause,
 )
@@ -193,14 +194,14 @@ def wait_for_operation_result( operation_client: Any,  operation_desc: Any,  tim
                 f"{operation_desc} 轮询状态时遇到临时错误，约 {format_seconds(sleep_time)} 秒后重试: "
                 f"{summarize_exception(exc)}"
             )
-            time.sleep(sleep_time)
+            sleep_and_detect_pause(sleep_time, f"{operation_desc} 临时错误重试")
             continue
 
         if getattr(operation, "status", None) == "DONE":
             ensure_operation_success(operation, operation_desc)
             return operation
 
-        time.sleep(poll_interval)
+        sleep_and_detect_pause(poll_interval, f"等待 {operation_desc} 完成")
 
     if last_error:
         raise TimeoutError(f"{operation_desc}等待超时，最后一次错误: {summarize_exception(last_error)}") from last_error
@@ -253,7 +254,7 @@ def call_with_retries( action_desc: Any,  func: Any,  max_retries: Any=INSTANCE_
                     f"{summarize_exception(exc)}"
                 )
             print_info(f"等待约 {format_seconds(sleep_time)} 秒后继续 {action_desc}...")
-            time.sleep(sleep_time)
+            sleep_and_detect_pause(sleep_time, f"{action_desc} 重试冷却")
 
     raise RuntimeError(
         f"{action_desc} 在 {max_retries} 次尝试后仍失败: {summarize_exception(last_error)}"

@@ -36,6 +36,7 @@ from gcp_utils import (
     print_info,
     print_success,
     print_warning,
+    sleep_and_detect_pause,
     summarize_text_block,
 )
 
@@ -298,7 +299,7 @@ def wait_for_remote_ready(project_id: Any,  instance_info: Any,  remote_config: 
             print_info(f"SSH 尚未就绪，继续等待... ({attempt_counter} 次探测) | 最近响应: {reason}")
 
         sleep_time = apply_jitter(REMOTE_READY_POLL_INTERVAL, jitter_ratio=0.1, jitter_cap=2)
-        time.sleep(sleep_time)
+        sleep_and_detect_pause(sleep_time, "等待 SSH 服务就绪")
 
     print_warning(f"等待 SSH 就绪超时（{format_duration(REMOTE_READY_TIMEOUT)}）。")
     return False
