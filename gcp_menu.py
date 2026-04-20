@@ -28,12 +28,16 @@ from gcp_reroll import (
     is_reroll_state_compatible,
     load_reroll_stats_from_file,
     reroll_cpu_loop,
+    reroll_ip_amd_loop,
+    reroll_ip_loop,
     show_reroll_state,
 )
 from gcp_utils import (
     configure_runtime_logging,
     configure_stdio,
     ensure_libraries_or_exit,
+    get_default_reroll_ip_amd_state_file,
+    get_default_reroll_ip_state_file,
     get_default_reroll_state_file,
     handle_doctor,
     print_info,
@@ -46,7 +50,10 @@ __all__ = [
     'run_remote_action_for_context',
     'menu_create_action',
     'menu_select_instance_action',
+    'run_menu_reroll_mode',
     'menu_reroll_action',
+    'menu_reroll_ip_action',
+    'menu_reroll_ip_amd_action',
     'menu_show_reroll_state_action',
     'menu_firewall_action',
     'menu_remote_apt_action',
@@ -93,29 +100,66 @@ def menu_create_action(context: Any) -> Any:
 def menu_select_instance_action(context: Any) -> Any:
     context.current_instance = select_instance(context.project_id)
 
-def menu_reroll_action(context: Any) -> Any:
+def run_menu_reroll_mode(
+    context: Any,
+    target_mode: Any,
+    state_path: Any,
+    reroll_func: Any,
+    completed_check: Any,
+    resume_message: Any,
+) -> Any:
     current_instance = ensure_context_instance(context)
     if current_instance:
-        default_state_path = get_default_reroll_state_file()
-        existing_stats = load_reroll_stats_from_file(default_state_path)
+        existing_stats = load_reroll_stats_from_file(state_path)
         resume = bool(
             existing_stats
-            and not existing_stats.success_cpu
+            and not completed_check(existing_stats)
             and is_reroll_state_compatible(
                 existing_stats,
                 project_id=context.project_id,
                 instance_name=current_instance.name,
                 zone=current_instance.zone,
+                target_mode=target_mode,
             )
         )
         if resume:
-            print_info("检测到当前实例存在可恢复的刷 CPU 状态，将自动继续上次进度。")
-        context.current_instance = reroll_cpu_loop(
+            print_info(resume_message)
+        context.current_instance = reroll_func(
             context.project_id,
             current_instance,
-            state_file=default_state_path,
+            state_file=state_path,
             resume=resume,
         )
+
+def menu_reroll_action(context: Any) -> Any:
+    run_menu_reroll_mode(
+        context,
+        "amd",
+        get_default_reroll_state_file(),
+        reroll_cpu_loop,
+        lambda stats: bool(stats.success_cpu),
+        "检测到当前实例存在可恢复的刷 CPU 状态，将自动继续上次进度。",
+    )
+
+def menu_reroll_ip_action(context: Any) -> Any:
+    run_menu_reroll_mode(
+        context,
+        "ip",
+        get_default_reroll_ip_state_file(),
+        reroll_ip_loop,
+        lambda stats: bool(stats.success_external_ip),
+        "检测到当前实例存在可恢复的刷 IP 状态，将自动继续上次进度。",
+    )
+
+def menu_reroll_ip_amd_action(context: Any) -> Any:
+    run_menu_reroll_mode(
+        context,
+        "ip_amd",
+        get_default_reroll_ip_amd_state_file(),
+        reroll_ip_amd_loop,
+        lambda stats: bool(stats.success_external_ip and stats.success_cpu),
+        "检测到当前实例存在可恢复的刷 IP + AMD 状态，将自动继续上次进度。",
+    )
 
 def menu_show_reroll_state_action(context: Any) -> Any:
     show_reroll_state(

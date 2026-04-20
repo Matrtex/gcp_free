@@ -42,6 +42,8 @@ DEPS_HASH_FILE = ".deps.sha256"
 LOG_DIR_NAME = ".gcp_free_logs"
 STATE_DIR_NAME = ".gcp_free_state"
 DEFAULT_REROLL_STATE_FILE = "reroll_state.json"
+DEFAULT_REROLL_IP_STATE_FILE = "reroll_ip_state.json"
+DEFAULT_REROLL_IP_AMD_STATE_FILE = "reroll_ip_amd_state.json"
 
 # GCP operation 等待参数：用于 start/stop/create/delete 等长操作。
 OPERATION_WAIT_TIMEOUT = 300

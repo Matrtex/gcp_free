@@ -28,6 +28,8 @@ from gcp_utils import (
     apply_jitter,
     format_duration,
     format_seconds,
+    get_default_reroll_ip_amd_state_file,
+    get_default_reroll_ip_state_file,
     get_default_reroll_state_file,
     print_info,
     print_success,
@@ -41,6 +43,11 @@ from gcp_utils import (
 __all__ = [
     'print_reroll_summary',
     'format_timestamp',
+    'get_reroll_target_label',
+    'get_default_state_file_for_mode',
+    'normalize_external_ip',
+    'is_target_cpu',
+    'is_ip_target_met',
     'load_reroll_stats_from_file',
     'is_reroll_state_compatible',
     'print_reroll_state_snapshot',
@@ -58,12 +65,15 @@ __all__ = [
     'get_oauth_circuit_breaker_cooldown',
     'get_reroll_cooldown_policy',
     'show_reroll_state',
+    'reroll_target_loop',
     'reroll_cpu_loop',
+    'reroll_ip_loop',
+    'reroll_ip_amd_loop',
 ]
 
 def print_reroll_summary(stats: Any) -> Any:
     print("\n" + "-" * 50)
-    print_info("刷 AMD 运行摘要")
+    print_info(f"{get_reroll_target_label(stats.target_mode)} 运行摘要")
     print(f"总耗时: {format_duration(time.time() - stats.start_time)}")
     soft_count = get_soft_exception_count(stats)
     print(f"尝试轮次: {stats.attempts} | 软异常轮次: {soft_count} | 硬异常轮次: {stats.hard_failure_count}")
@@ -74,12 +84,19 @@ def print_reroll_summary(stats: Any) -> Any:
 
     if stats.success_cpu:
         print_success(f"命中目标 CPU: {stats.success_cpu}")
+    if stats.success_external_ip:
+        print_success(f"命中目标外网 IP: {stats.success_external_ip}")
 
     if stats.cpu_counter:
         top_results = " | ".join(
             f"{platform} x{count}" for platform, count in Counter(stats.cpu_counter).most_common(5)
         )
         print(f"结果统计: {top_results}")
+    if stats.ip_counter:
+        top_ips = " | ".join(
+            f"{ip} x{count}" for ip, count in Counter(stats.ip_counter).most_common(5)
+        )
+        print(f"IP 统计: {top_ips}")
 
     if stats.recent_results:
         print(f"最近结果: {' -> '.join(stats.recent_results)}")
@@ -91,6 +108,39 @@ def format_timestamp(timestamp_value: Any) -> Any:
     if not timestamp_value:
         return "-"
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_value))
+
+def get_reroll_target_label(target_mode: Any) -> Any:
+    return {
+        "amd": "刷 AMD",
+        "ip": "刷外网 IP",
+        "ip_amd": "刷外网 IP + AMD",
+    }.get(target_mode, "刷资源")
+
+def get_default_state_file_for_mode(target_mode: Any) -> Any:
+    if target_mode == "ip":
+        return get_default_reroll_ip_state_file()
+    if target_mode == "ip_amd":
+        return get_default_reroll_ip_amd_state_file()
+    return get_default_reroll_state_file()
+
+def normalize_external_ip(external_ip: Any) -> Any:
+    value = str(external_ip or "").strip()
+    if not value or value == "-":
+        return None
+    return value
+
+def is_target_cpu(cpu_platform: Any) -> Any:
+    platform = str(cpu_platform or "").upper()
+    return "AMD" in platform or "EPYC" in platform
+
+def is_ip_target_met(initial_external_ip: Any,  current_external_ip: Any) -> Any:
+    current_ip = normalize_external_ip(current_external_ip)
+    if not current_ip:
+        return False
+    initial_ip = normalize_external_ip(initial_external_ip)
+    if not initial_ip:
+        return True
+    return current_ip != initial_ip
 
 def load_reroll_stats_from_file(state_path: Any) -> Any:
     payload = load_json_state(state_path, default=None)
@@ -106,7 +156,7 @@ def load_reroll_stats_from_file(state_path: Any) -> Any:
     except (TypeError, ValueError, KeyError):
         return None
 
-def is_reroll_state_compatible(stats: Any,  project_id: Any=None,  instance_name: Any=None,  zone: Any=None) -> Any:
+def is_reroll_state_compatible(stats: Any,  project_id: Any=None,  instance_name: Any=None,  zone: Any=None,  target_mode: Any=None) -> Any:
     if not stats:
         return False
     if project_id and stats.project_id != project_id:
@@ -115,30 +165,42 @@ def is_reroll_state_compatible(stats: Any,  project_id: Any=None,  instance_name
         return False
     if zone and stats.zone != zone:
         return False
+    if target_mode and getattr(stats, "target_mode", "amd") != target_mode:
+        return False
     return True
 
-def print_reroll_state_snapshot(stats: Any,  state_path: Any,  title: Any="刷 CPU 状态") -> Any:
+def print_reroll_state_snapshot(stats: Any,  state_path: Any,  title: Any="刷状态") -> Any:
     print("\n" + "-" * 50)
     print_info(title)
     print(f"状态文件: {state_path}")
     print(f"目标项目: {stats.project_id}")
     print(f"目标实例: {stats.instance_name} ({stats.zone})")
+    print(f"目标模式: {get_reroll_target_label(stats.target_mode)}")
     print(f"开始时间: {format_timestamp(stats.start_time)}")
     print(f"最后更新: {format_timestamp(stats.last_updated)}")
     soft_count = get_soft_exception_count(stats)
     print(f"累计尝试: {stats.attempts} | 软异常: {soft_count} | 硬异常: {stats.hard_failure_count}")
     print(f"最近 CPU: {stats.last_cpu or '-'}")
+    print(f"初始外网 IP: {stats.initial_external_ip or '-'}")
+    print(f"最近外网 IP: {stats.last_external_ip or '-'}")
     print(f"最近异常: {stats.last_error or '-'}")
     exception_breakdown = format_exception_breakdown(stats)
     if exception_breakdown:
         print(f"异常明细: {exception_breakdown}")
     if stats.success_cpu:
         print_success(f"状态文件记录的命中 CPU: {stats.success_cpu}")
+    if stats.success_external_ip:
+        print_success(f"状态文件记录的命中外网 IP: {stats.success_external_ip}")
     if stats.cpu_counter:
         top_results = " | ".join(
             f"{platform} x{count}" for platform, count in Counter(stats.cpu_counter).most_common(5)
         )
         print(f"累计结果: {top_results}")
+    if stats.ip_counter:
+        top_ips = " | ".join(
+            f"{ip} x{count}" for ip, count in Counter(stats.ip_counter).most_common(5)
+        )
+        print(f"累计 IP: {top_ips}")
     if stats.recent_results:
         print(f"最近结果: {' -> '.join(stats.recent_results)}")
     if stats.recent_errors:
@@ -150,9 +212,10 @@ def print_reroll_progress(stats: Any,  state_path: Any) -> Any:
         top_cpu, top_count = Counter(stats.cpu_counter).most_common(1)[0]
         top_cpu = f"{top_cpu} x{top_count}"
     soft_count = get_soft_exception_count(stats)
+    ip_part = f" | 当前 IP {stats.last_external_ip or '-'}"
     print_info(
         f"累计进度: 已尝试 {stats.attempts} 次 | 软异常 {soft_count} 次 | 硬异常 {stats.hard_failure_count} 次 | "
-        f"最高频结果 {top_cpu} | 状态文件 {state_path}"
+        f"最高频结果 {top_cpu}{ip_part} | 状态文件 {state_path}"
     )
 
 def get_soft_exception_count(stats: Any) -> Any:
@@ -267,7 +330,7 @@ def show_reroll_state(state_file: Any=None,  project_id: Any=None,  instance_inf
     state_path = state_file or get_default_reroll_state_file()
     stats = load_reroll_stats_from_file(state_path)
     if not stats:
-        print_warning(f"未找到有效的刷 CPU 状态文件: {state_path}")
+        print_warning(f"未找到有效的刷状态文件: {state_path}")
         return False
 
     if instance_info and not is_reroll_state_compatible(
@@ -280,16 +343,19 @@ def show_reroll_state(state_file: Any=None,  project_id: Any=None,  instance_inf
     elif project_id and not is_reroll_state_compatible(stats, project_id=project_id):
         print_warning("状态文件存在，但与当前项目不一致，下面显示文件中的实际目标。")
 
-    print_reroll_state_snapshot(stats, state_path, title="当前刷 CPU 状态")
+    print_reroll_state_snapshot(stats, state_path, title=f"当前{get_reroll_target_label(stats.target_mode)}状态")
     return True
 
-def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,  resume: Any=False) -> Any:
+def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="amd",  state_file: Any=None,  resume: Any=False) -> Any:
     instance_name = instance_info.name
     zone = instance_info.zone
+    require_amd = target_mode in {"amd", "ip_amd"}
+    require_ip = target_mode in {"ip", "ip_amd"}
+    target_label = get_reroll_target_label(target_mode)
 
     instance_client = instances_client()
     attempt_counter = 1
-    state_path = state_file or get_default_reroll_state_file()
+    state_path = state_file or get_default_state_file_for_mode(target_mode)
     stats = None
 
     if resume:
@@ -299,15 +365,16 @@ def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,
             project_id=project_id,
             instance_name=instance_name,
             zone=zone,
+            target_mode=target_mode,
         ):
             # 已经命中过的状态文件只用于查看，不自动续跑，避免误以为脚本还在继续刷。
-            if existing_stats.success_cpu:
+            if existing_stats.success_cpu or existing_stats.success_external_ip:
                 print_warning("检测到状态文件已记录命中结果，本次将忽略旧状态并重新开始。")
             else:
                 stats = existing_stats
                 attempt_counter = stats.attempts + 1
                 print_info(f"检测到可恢复的状态文件，正在从第 {attempt_counter} 轮继续。")
-                print_reroll_state_snapshot(stats, state_path, title="已恢复上次刷 CPU 状态")
+                print_reroll_state_snapshot(stats, state_path, title=f"已恢复上次{target_label}状态")
         elif existing_stats:
             print_warning("检测到旧状态文件，但目标项目或实例不一致，将忽略并重新开始。")
 
@@ -317,19 +384,36 @@ def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,
             instance_name=instance_name,
             zone=zone,
             start_time=time.time(),
+            target_mode=target_mode,
         )
+        if require_ip:
+            try:
+                initial_info = refresh_instance_info(project_id, instance_info, announce=False)
+                stats.initial_external_ip = normalize_external_ip(initial_info.external_ip)
+                stats.last_external_ip = stats.initial_external_ip
+            except Exception as exc:
+                print_warning(f"读取初始外网 IP 失败，将以首次启动后的 IP 为准: {summarize_exception(exc)}")
         stats.last_updated = time.time()
         save_json_state(state_path, stats.to_dict())
 
     print_info(f"目标实例: {instance_name} ({zone})")
-    print_info("目标: 只要 CPU 包含 'AMD' 或 'EPYC' 即停止。")
+    if target_mode == "amd":
+        print_info("目标: 只要 CPU 包含 'AMD' 或 'EPYC' 即停止。")
+    elif target_mode == "ip":
+        if stats.initial_external_ip:
+            print_info(f"目标: 外网 IP 从 {stats.initial_external_ip} 变为任意新 IP 即停止。")
+        else:
+            print_info("目标: 当前无初始外网 IP，获取到任意有效外网 IP 即停止。")
+    else:
+        initial_text = stats.initial_external_ip or "无初始外网 IP"
+        print_info(f"目标: 外网 IP 变化（初始: {initial_text}）且 CPU 包含 'AMD' 或 'EPYC' 时停止。")
     last_loop_activity_time = time.time()
 
     try:
         while True:
             last_loop_activity_time = warn_if_long_pause(
                 last_loop_activity_time,
-                f"刷 CPU 主循环（实例 {instance_name}）",
+                f"{target_label} 主循环（实例 {instance_name}）",
             )
             had_exception = False
             exception_kind = None
@@ -340,40 +424,72 @@ def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,
 
             try:
                 ensure_instance_running(instance_client, project_id, zone, instance_name)
-                current_platform, current_status = wait_for_cpu_platform(
-                    instance_client, project_id, zone, instance_name
-                )
+                current_platform = "未检测（当前模式不要求 CPU）"
+                current_status = "RUNNING"
+                if require_amd:
+                    current_platform, current_status = wait_for_cpu_platform(
+                        instance_client, project_id, zone, instance_name
+                    )
 
-                if current_platform is None:
-                    if current_status == "RUNNING":
-                        current_platform = "CPU 信息同步超时"
+                    if current_platform is None:
+                        if current_status == "RUNNING":
+                            current_platform = "CPU 信息同步超时"
+                        else:
+                            current_platform = f"实例未稳定运行（当前状态: {current_status}）"
+                        print_warning(f"本轮未拿到有效 CPU 信息：{current_platform}")
                     else:
-                        current_platform = f"实例未稳定运行（当前状态: {current_status}）"
-                    print_warning(f"本轮未拿到有效 CPU 信息：{current_platform}")
-                else:
-                    print_info(f"检测到 CPU: {current_platform}")
+                        print_info(f"检测到 CPU: {current_platform}")
+
+                refreshed_info = refresh_instance_info(project_id, instance_info, announce=False)
+                current_external_ip = normalize_external_ip(refreshed_info.external_ip)
+                if require_ip:
+                    print_info(f"检测到外网 IP: {current_external_ip or '-'}")
 
                 current_platform = str(current_platform)
-                stats.cpu_counter[current_platform] = stats.cpu_counter.get(current_platform, 0) + 1
+                if require_amd:
+                    stats.cpu_counter[current_platform] = stats.cpu_counter.get(current_platform, 0) + 1
+                if require_ip and current_external_ip:
+                    stats.ip_counter[current_external_ip] = stats.ip_counter.get(current_external_ip, 0) + 1
                 stats.consecutive_oauth_timeouts = 0
-                remember_recent(stats.recent_results, current_platform)
-                stats.last_cpu = current_platform
+                result_parts = []
+                if require_amd:
+                    result_parts.append(current_platform)
+                if require_ip:
+                    result_parts.append(f"IP={current_external_ip or '-'}")
+                remember_recent(stats.recent_results, " | ".join(result_parts) or current_platform)
+                if require_amd:
+                    stats.last_cpu = current_platform
+                stats.last_external_ip = current_external_ip
                 stats.last_error = None
                 stats.last_updated = time.time()
                 recalculate_exception_count(stats)
                 save_json_state(state_path, stats.to_dict())
                 print_reroll_progress(stats, state_path)
 
-                current_platform_upper = current_platform.upper()
-                if "AMD" in current_platform_upper or "EPYC" in current_platform_upper:
-                    stats.success_cpu = current_platform
+                cpu_ok = (not require_amd) or is_target_cpu(current_platform)
+                ip_ok = (not require_ip) or is_ip_target_met(stats.initial_external_ip, current_external_ip)
+                if cpu_ok and ip_ok:
+                    if require_amd:
+                        stats.success_cpu = current_platform
+                    if require_ip:
+                        stats.success_external_ip = current_external_ip
                     stats.last_updated = time.time()
                     save_json_state(state_path, stats.to_dict())
-                    print_success(f"恭喜！已成功刷到目标 CPU: {current_platform}")
+                    if require_amd:
+                        print_success(f"已成功刷到目标 CPU: {current_platform}")
+                    if require_ip:
+                        print_success(f"已成功刷到目标外网 IP: {current_external_ip}")
                     print_info("脚本执行完毕。")
                     break
 
-                print_warning(f"结果不满意 ({current_platform})。准备重置...")
+                not_ready_reasons = []
+                if require_amd and not cpu_ok:
+                    not_ready_reasons.append(f"CPU={current_platform}")
+                if require_ip and not ip_ok:
+                    not_ready_reasons.append(
+                        f"IP={current_external_ip or '-'}，初始={stats.initial_external_ip or '-'}"
+                    )
+                print_warning(f"结果不满意 ({'；'.join(not_ready_reasons)})。准备重置...")
                 print_info(f"正在关停虚拟机 {instance_name}...")
                 _, stop_wait_seconds = ensure_instance_stopped(instance_client, project_id, zone, instance_name)
             except Exception as e:
@@ -410,9 +526,18 @@ def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,
             last_loop_activity_time = time.time()
     finally:
         print_reroll_summary(stats)
-        print_reroll_state_snapshot(stats, state_path, title="刷 CPU 状态文件摘要")
+        print_reroll_state_snapshot(stats, state_path, title=f"{target_label} 状态文件摘要")
 
     try:
         return refresh_instance_info(project_id, instance_info, announce=False)
     except Exception:
         return instance_info
+
+def reroll_cpu_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,  resume: Any=False) -> Any:
+    return reroll_target_loop(project_id, instance_info, target_mode="amd", state_file=state_file, resume=resume)
+
+def reroll_ip_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,  resume: Any=False) -> Any:
+    return reroll_target_loop(project_id, instance_info, target_mode="ip", state_file=state_file, resume=resume)
+
+def reroll_ip_amd_loop(project_id: Any,  instance_info: Any,  state_file: Any=None,  resume: Any=False) -> Any:
+    return reroll_target_loop(project_id, instance_info, target_mode="ip_amd", state_file=state_file, resume=resume)

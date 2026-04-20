@@ -8,6 +8,7 @@
 
 - 创建/选择 GCP 免费实例
 - 刷 AMD CPU
+- 刷外网 IP，或同时刷外网 IP + AMD/EPYC CPU
 - 配置防火墙规则
 - 换源、安装 dae、上传 `config.dae`
 - 远程安装流量监控脚本（iptables 监控 / 超额自动关机）
@@ -55,6 +56,8 @@ gcloud auth application-default login
 
 ```powershell
 .\start.ps1 list-instances --project-id <你的项目ID>
+.\start.ps1 reroll-ip --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
 .\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
 .\start.ps1 doctor --project-id <你的项目ID>
 .\start.ps1 setup --project-id <你的项目ID> --region us-west1 --skip-reroll
@@ -138,6 +141,20 @@ python scripts/build_exe.py --clean --version v1.0.0
 .\start.ps1 reroll-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
 ```
 
+刷外网 IP：
+
+```powershell
+.\start.ps1 reroll-ip --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+```
+
+同时刷外网 IP 和 AMD/EPYC CPU：
+
+```powershell
+.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+```
+
+`reroll-ip` 会以启动前读取到的外网 IP 为基准，停启实例直到外网 IP 变化；如果一开始没有外网 IP，则获取到任意有效外网 IP 即视为成功。`reroll-ip-amd` 需要同一轮同时满足外网 IP 变化和 CPU 命中 AMD/EPYC。
+
 非交互远程 dry-run：
 
 ```powershell
@@ -178,6 +195,13 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ```text
 .gcp_free_state/reroll_state.json
+```
+
+刷 IP 和刷 IP + AMD 状态文件默认写入：
+
+```text
+.gcp_free_state/reroll_ip_state.json
+.gcp_free_state/reroll_ip_amd_state.json
 ```
 
 `doctor` 现在会额外检查：

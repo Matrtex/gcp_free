@@ -98,8 +98,13 @@ class RerollStats:
     hard_failure_count: int = 0
     consecutive_oauth_timeouts: int = 0
     cpu_counter: Dict[str, int] = field(default_factory=dict)
+    ip_counter: Dict[str, int] = field(default_factory=dict)
     recent_results: List[str] = field(default_factory=list)
     recent_errors: List[str] = field(default_factory=list)
+    target_mode: str = "amd"
+    initial_external_ip: Optional[str] = None
+    last_external_ip: Optional[str] = None
+    success_external_ip: Optional[str] = None
     success_cpu: Optional[str] = None
     last_cpu: Optional[str] = None
     last_error: Optional[str] = None
@@ -120,8 +125,13 @@ class RerollStats:
             hard_failure_count=int(data.get("hard_failure_count") or 0),
             consecutive_oauth_timeouts=int(data.get("consecutive_oauth_timeouts") or 0),
             cpu_counter=dict(data.get("cpu_counter") or {}),
+            ip_counter=dict(data.get("ip_counter") or {}),
             recent_results=list(data.get("recent_results") or []),
             recent_errors=list(data.get("recent_errors") or []),
+            target_mode=data.get("target_mode", "amd"),
+            initial_external_ip=data.get("initial_external_ip"),
+            last_external_ip=data.get("last_external_ip"),
+            success_external_ip=data.get("success_external_ip"),
             success_cpu=data.get("success_cpu"),
             last_cpu=data.get("last_cpu"),
             last_error=data.get("last_error"),
@@ -142,8 +152,13 @@ class RerollStats:
             "hard_failure_count": self.hard_failure_count,
             "consecutive_oauth_timeouts": self.consecutive_oauth_timeouts,
             "cpu_counter": dict(self.cpu_counter),
+            "ip_counter": dict(self.ip_counter),
             "recent_results": list(self.recent_results),
             "recent_errors": list(self.recent_errors),
+            "target_mode": self.target_mode,
+            "initial_external_ip": self.initial_external_ip,
+            "last_external_ip": self.last_external_ip,
+            "success_external_ip": self.success_external_ip,
             "success_cpu": self.success_cpu,
             "last_cpu": self.last_cpu,
             "last_error": self.last_error,

@@ -35,6 +35,8 @@ from gcp_menu import (
     menu_remote_apt_action,
     menu_remote_dae_action,
     menu_reroll_action,
+    menu_reroll_ip_action,
+    menu_reroll_ip_amd_action,
     menu_select_instance_action,
     menu_show_reroll_state_action,
     menu_traffic_monitor_action,
@@ -47,6 +49,8 @@ from gcp_remote import (
 )
 from gcp_reroll import (
     reroll_cpu_loop,
+    reroll_ip_amd_loop,
+    reroll_ip_loop,
     show_reroll_state,
 )
 from gcp_utils import (
@@ -67,6 +71,8 @@ __all__ = [
     'handle_create_cli',
     'handle_list_instances_cli',
     'handle_reroll_amd_cli',
+    'handle_reroll_ip_cli',
+    'handle_reroll_ip_amd_cli',
     'handle_firewall_cli',
     'handle_run_script_cli',
     'handle_deploy_dae_config_cli',
@@ -178,6 +184,24 @@ def handle_list_instances_cli(args: Namespace) -> None:
 def handle_reroll_amd_cli(args: Namespace) -> None:
     instance_info = get_cli_instance(args)
     reroll_cpu_loop(
+        args.project_id,
+        instance_info,
+        state_file=args.state_file,
+        resume=args.resume,
+    )
+
+def handle_reroll_ip_cli(args: Namespace) -> None:
+    instance_info = get_cli_instance(args)
+    reroll_ip_loop(
+        args.project_id,
+        instance_info,
+        state_file=args.state_file,
+        resume=args.resume,
+    )
+
+def handle_reroll_ip_amd_cli(args: Namespace) -> None:
+    instance_info = get_cli_instance(args)
+    reroll_ip_amd_loop(
         args.project_id,
         instance_info,
         state_file=args.state_file,
@@ -327,6 +351,8 @@ ACTION_SPECS = [
     ActionSpec("create", "新建免费实例", "create", "新建免费实例", menu_create_action, handle_create_cli),
     ActionSpec("select-instance", "选择服务器", None, "选择当前服务器", menu_select_instance_action, None),
     ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", menu_reroll_action, handle_reroll_amd_cli),
+    ActionSpec("reroll-ip", "刷外网 IP", "reroll-ip", "循环重启实例，直到外网 IP 变化", menu_reroll_ip_action, handle_reroll_ip_cli),
+    ActionSpec("reroll-ip-amd", "刷外网 IP + AMD CPU", "reroll-ip-amd", "循环重启实例，直到外网 IP 变化且命中 AMD/EPYC", menu_reroll_ip_amd_action, handle_reroll_ip_amd_cli),
     ActionSpec("show-reroll-state", "查看刷 CPU 状态", "show-reroll-state", "显示当前刷 CPU 状态文件摘要", menu_show_reroll_state_action, handle_show_reroll_state_cli),
     ActionSpec("firewall", "配置防火墙规则", "firewall", "配置入站/出站规则", menu_firewall_action, handle_firewall_cli),
     ActionSpec("apt", "Debian换源", "run-script", "上传并执行 apt.sh", menu_remote_apt_action, handle_run_script_cli),
@@ -401,6 +427,30 @@ def build_arg_parser() -> Any:
     )
     reroll_parser.add_argument("--resume", action="store_true", help="从已有状态文件恢复累计统计并继续执行")
     reroll_parser.set_defaults(handler=ACTION_SPEC_MAP["reroll-amd"].cli_handler)
+
+    reroll_ip_parser = subparsers.add_parser(
+        "reroll-ip",
+        parents=[instance_parent],
+        help=ACTION_SPEC_MAP["reroll-ip"].description,
+    )
+    reroll_ip_parser.add_argument(
+        "--state-file",
+        help="刷 IP 状态文件路径，默认写入项目目录下的 .gcp_free_state/reroll_ip_state.json",
+    )
+    reroll_ip_parser.add_argument("--resume", action="store_true", help="从已有状态文件恢复累计统计并继续执行")
+    reroll_ip_parser.set_defaults(handler=ACTION_SPEC_MAP["reroll-ip"].cli_handler)
+
+    reroll_ip_amd_parser = subparsers.add_parser(
+        "reroll-ip-amd",
+        parents=[instance_parent],
+        help=ACTION_SPEC_MAP["reroll-ip-amd"].description,
+    )
+    reroll_ip_amd_parser.add_argument(
+        "--state-file",
+        help="刷 IP + AMD 状态文件路径，默认写入项目目录下的 .gcp_free_state/reroll_ip_amd_state.json",
+    )
+    reroll_ip_amd_parser.add_argument("--resume", action="store_true", help="从已有状态文件恢复累计统计并继续执行")
+    reroll_ip_amd_parser.set_defaults(handler=ACTION_SPEC_MAP["reroll-ip-amd"].cli_handler)
 
     show_reroll_state_parser = subparsers.add_parser(
         "show-reroll-state",

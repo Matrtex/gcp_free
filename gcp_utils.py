@@ -3,6 +3,8 @@ from __future__ import annotations
 from gcp_common import (
     Any,
     Counter,
+    DEFAULT_REROLL_IP_AMD_STATE_FILE,
+    DEFAULT_REROLL_IP_STATE_FILE,
     DEFAULT_REROLL_STATE_FILE,
     IMPORT_ERROR_MESSAGE,
     LOGGER,
@@ -50,6 +52,8 @@ __all__ = [
     'sleep_and_detect_pause',
     'get_default_log_file',
     'get_default_reroll_state_file',
+    'get_default_reroll_ip_state_file',
+    'get_default_reroll_ip_amd_state_file',
     'configure_runtime_logging',
     'sleep_with_countdown',
     'apply_jitter',
@@ -166,6 +170,18 @@ def get_default_reroll_state_file() -> Any:
     state_dir = os.path.join(root_dir, STATE_DIR_NAME)
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, DEFAULT_REROLL_STATE_FILE)
+
+def get_default_reroll_ip_state_file() -> Any:
+    root_dir = str(get_runtime_root())
+    state_dir = os.path.join(root_dir, STATE_DIR_NAME)
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, DEFAULT_REROLL_IP_STATE_FILE)
+
+def get_default_reroll_ip_amd_state_file() -> Any:
+    root_dir = str(get_runtime_root())
+    state_dir = os.path.join(root_dir, STATE_DIR_NAME)
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, DEFAULT_REROLL_IP_AMD_STATE_FILE)
 
 def configure_runtime_logging(log_file: Any=None) -> Any:
     configure_logger(log_file or get_default_log_file())

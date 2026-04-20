@@ -16,10 +16,15 @@ from gcp import (
     get_reroll_cooldown_policy,
     get_soft_exception_count,
     handle_setup_cli,
+    handle_reroll_ip_amd_cli,
+    handle_reroll_ip_cli,
     is_transient_gcp_error,
     is_reroll_state_compatible,
+    is_ip_target_met,
+    is_target_cpu,
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
+    parse_args,
     record_reroll_exception,
     read_cdn_ips,
     resolve_os_config,
@@ -144,6 +149,42 @@ class GcpHelpersTestCase(unittest.TestCase):
             "Max retries exceeded with url: /compute/v1/projects/demo/zones/us-west1-a/instances/vm-1"
         )
         self.assertTrue(is_transient_gcp_error(exc))
+
+    def test_is_target_cpu_accepts_amd_and_epyc(self):
+        self.assertTrue(is_target_cpu("AMD EPYC Milan"))
+        self.assertTrue(is_target_cpu("EPYC Rome"))
+        self.assertFalse(is_target_cpu("Intel Broadwell"))
+
+    def test_is_ip_target_met_requires_valid_changed_ip(self):
+        self.assertFalse(is_ip_target_met("35.1.2.3", "35.1.2.3"))
+        self.assertTrue(is_ip_target_met("35.1.2.3", "35.4.5.6"))
+        self.assertTrue(is_ip_target_met("-", "35.4.5.6"))
+        self.assertFalse(is_ip_target_met("35.1.2.3", "-"))
+
+    def test_reroll_ip_cli_commands_parse(self):
+        ip_args = parse_args([
+            "reroll-ip",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--resume",
+        ])
+        ip_amd_args = parse_args([
+            "reroll-ip-amd",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+        ])
+
+        self.assertIs(ip_args.handler, handle_reroll_ip_cli)
+        self.assertTrue(ip_args.resume)
+        self.assertIs(ip_amd_args.handler, handle_reroll_ip_amd_cli)
 
     def test_classify_reroll_exception_distinguishes_oauth_and_instance_stuck(self):
         oauth_exc = RuntimeError(
