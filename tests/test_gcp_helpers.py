@@ -16,6 +16,8 @@ from gcp import (
     get_reroll_cooldown_policy,
     get_soft_exception_count,
     handle_setup_cli,
+    handle_login_account_cli,
+    handle_switch_account_cli,
     handle_reroll_ip_amd_cli,
     handle_reroll_ip_cli,
     is_transient_gcp_error,
@@ -24,10 +26,13 @@ from gcp import (
     is_target_cpu,
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
+    login_gcloud_account,
+    list_gcloud_accounts_via_gcloud,
     parse_args,
     record_reroll_exception,
     read_cdn_ips,
     resolve_os_config,
+    switch_gcloud_account,
     sleep_and_detect_pause,
     summarize_text_block,
     warn_if_long_pause,
@@ -150,6 +155,71 @@ class GcpHelpersTestCase(unittest.TestCase):
         )
         self.assertTrue(is_transient_gcp_error(exc))
 
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_list_gcloud_accounts_via_gcloud_parses_active_flag(self, mock_run, _mock_find_gcloud):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='[{"account":"active@example.com","status":"ACTIVE"},{"account":"other@example.com","status":""}]',
+            stderr="",
+        )
+
+        accounts = list_gcloud_accounts_via_gcloud()
+
+        self.assertEqual(accounts[0]["account"], "active@example.com")
+        self.assertTrue(accounts[0]["active"])
+        self.assertFalse(accounts[1]["active"])
+
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_gcloud_account_syncs_adc_and_clears_client_cache(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        mock_clear_caches,
+    ):
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+
+        switched_account = switch_gcloud_account("demo@example.com", sync_adc=True, no_browser=True)
+
+        self.assertEqual(switched_account, "demo@example.com")
+        first_cmd = mock_run.call_args_list[0].args[0]
+        second_cmd = mock_run.call_args_list[1].args[0]
+        self.assertEqual(first_cmd, ["gcloud", "config", "set", "account", "demo@example.com"])
+        self.assertEqual(
+            second_cmd,
+            ["gcloud", "auth", "application-default", "login", "demo@example.com", "--no-browser"],
+        )
+        self.assertEqual(mock_clear_caches.call_count, 2)
+
+    @patch("gcp_instance.get_current_gcloud_account", return_value="new@example.com")
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_login_gcloud_account_uses_auth_login_with_update_adc(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        mock_clear_caches,
+        _mock_current_account,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        switched_account = login_gcloud_account("new@example.com", no_browser=True)
+
+        self.assertEqual(switched_account, "new@example.com")
+        first_cmd = mock_run.call_args_list[0].args[0]
+        self.assertEqual(
+            first_cmd,
+            ["gcloud", "auth", "login", "new@example.com", "--no-browser", "--update-adc"],
+        )
+        mock_clear_caches.assert_called_once()
+
     def test_is_target_cpu_accepts_amd_and_epyc(self):
         self.assertTrue(is_target_cpu("AMD EPYC Milan"))
         self.assertTrue(is_target_cpu("EPYC Rome"))
@@ -185,6 +255,30 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertIs(ip_args.handler, handle_reroll_ip_cli)
         self.assertTrue(ip_args.resume)
         self.assertIs(ip_amd_args.handler, handle_reroll_ip_amd_cli)
+
+    def test_switch_account_cli_command_parses(self):
+        args = parse_args([
+            "switch-account",
+            "--account",
+            "demo@example.com",
+            "--no-sync-adc",
+        ])
+
+        self.assertIs(args.handler, handle_switch_account_cli)
+        self.assertEqual(args.account, "demo@example.com")
+        self.assertTrue(args.no_sync_adc)
+
+    def test_login_account_cli_command_parses(self):
+        args = parse_args([
+            "login-account",
+            "--account",
+            "new@example.com",
+            "--no-browser",
+        ])
+
+        self.assertIs(args.handler, handle_login_account_cli)
+        self.assertEqual(args.account, "new@example.com")
+        self.assertTrue(args.no_browser)
 
     def test_classify_reroll_exception_distinguishes_oauth_and_instance_stuck(self):
         oauth_exc = RuntimeError(

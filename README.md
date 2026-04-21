@@ -7,6 +7,7 @@
 ## 功能概览
 
 - 创建/选择 GCP 免费实例
+- 登录新账号，或切换已有 gcloud/ADC 账号，并重新选择项目
 - 刷 AMD CPU
 - 刷外网 IP，或同时刷外网 IP + AMD/EPYC CPU
 - 配置防火墙规则
@@ -56,6 +57,8 @@ gcloud auth application-default login
 
 ```powershell
 .\start.ps1 list-instances --project-id <你的项目ID>
+.\start.ps1 login-account --account <你的Google账号邮箱>
+.\start.ps1 switch-account --account <你的Google账号邮箱>
 .\start.ps1 reroll-ip --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
 .\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
 .\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
@@ -128,6 +131,25 @@ python scripts/build_exe.py --clean --version v1.0.0
 ```powershell
 .\start.ps1 doctor --project-id <你的项目ID>
 ```
+
+登录新账号：
+
+```powershell
+.\start.ps1 login-account
+.\start.ps1 login-account --account <你的Google账号邮箱>
+.\start.ps1 login-account --account <你的Google账号邮箱> --no-browser
+```
+
+这个命令会调用 `gcloud auth login --update-adc`，一次完成新账号登录、切换活跃账号和同步 `Application Default Credentials`。
+
+切换账号：
+
+```powershell
+.\start.ps1 switch-account --account <你的Google账号邮箱>
+.\start.ps1 switch-account --account <你的Google账号邮箱> --no-sync-adc
+```
+
+这个命令用于切换“已经登录过”的账号。默认会同时切换 `gcloud` 活跃账号，并同步 `Application Default Credentials`。如果你只想切换 `gcloud` 配置账号、不改 ADC，可以加 `--no-sync-adc`。
 
 刷 CPU 状态查看：
 

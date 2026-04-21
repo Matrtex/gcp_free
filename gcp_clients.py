@@ -92,3 +92,14 @@ def disks_client() -> Any:
     return compute_v1.DisksClient(
         transport=_transport("GCP_FREE_COMPUTE_TRANSPORT", DEFAULT_COMPUTE_TRANSPORT)
     )
+
+
+def clear_google_cloud_client_caches() -> None:
+    projects_client.cache_clear()
+    instances_client.cache_clear()
+    images_client.cache_clear()
+    zones_client.cache_clear()
+    zone_operations_client.cache_clear()
+    global_operations_client.cache_clear()
+    firewalls_client.cache_clear()
+    disks_client.cache_clear()

@@ -13,6 +13,7 @@ from gcp_common import (
     LOGGER,
     OS_IMAGE_OPTIONS,
     REGION_OPTIONS,
+    clear_google_cloud_client_caches,
     compute_v1,
     find_gcloud_command,
     images_client,
@@ -54,6 +55,11 @@ from gcp_utils import (
 )
 
 __all__ = [
+    'list_gcloud_accounts_via_gcloud',
+    'get_current_gcloud_account',
+    'select_gcloud_account',
+    'login_gcloud_account',
+    'switch_gcloud_account',
     'list_active_projects_via_gcloud',
     'build_instance_info_from_gcloud',
     'list_instances_via_gcloud',
@@ -78,6 +84,141 @@ __all__ = [
     'ensure_instance_stopped',
     'build_setup_dry_run_instance',
 ]
+
+def list_gcloud_accounts_via_gcloud() -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        raise RuntimeError("当前环境未找到 gcloud，无法读取账号列表。")
+
+    result = subprocess.run(
+        [
+            gcloud_command,
+            "auth",
+            "list",
+            "--format=json(account,status)",
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        raise RuntimeError(f"gcloud auth list 执行失败: {stderr_summary}")
+
+    raw_accounts = json.loads(result.stdout or "[]")
+    accounts = []
+    for item in raw_accounts:
+        account = (item.get("account") or "").strip()
+        if not account:
+            continue
+        status = (item.get("status") or "").strip().upper()
+        accounts.append(
+            {
+                "account": account,
+                "status": status or "UNKNOWN",
+                "active": status == "ACTIVE",
+            }
+        )
+    return accounts
+
+def get_current_gcloud_account() -> Any:
+    try:
+        accounts = list_gcloud_accounts_via_gcloud()
+    except Exception:
+        return ""
+    for item in accounts:
+        if item["active"]:
+            return item["account"]
+    return ""
+
+def select_gcloud_account() -> Any:
+    print_info("正在读取本机 gcloud 登录账号...")
+    accounts = list_gcloud_accounts_via_gcloud()
+    if not accounts:
+        raise RuntimeError("未找到任何 gcloud 已登录账号，请先运行 gcloud auth login。")
+    selected = select_from_list(
+        accounts,
+        "请选择目标账号",
+        lambda item: f"{item['account']} {'[当前激活]' if item['active'] else ''}".strip(),
+    )
+    return selected["account"]
+
+def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        raise RuntimeError("当前环境未找到 gcloud，无法登录新账号。")
+
+    target_account = str(account or "").strip()
+    login_cmd = [gcloud_command, "auth", "login"]
+    if target_account:
+        login_cmd.append(target_account)
+    if no_browser:
+        login_cmd.append("--no-browser")
+    login_cmd.append("--update-adc")
+
+    if target_account:
+        print_info(f"正在登录新账号: {target_account}")
+    else:
+        print_info("正在登录新账号，请按浏览器中的提示选择账号。")
+    print_info("该过程会同时更新 gcloud 活跃账号和 Application Default Credentials。")
+    result = subprocess.run(login_cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "登录新账号失败。请检查浏览器授权流程是否完成，或改用 --no-browser 模式。"
+        )
+
+    clear_google_cloud_client_caches()
+    current_account = get_current_gcloud_account()
+    if current_account:
+        print_success(f"已登录并切换到账号: {current_account}")
+        return current_account
+    if target_account:
+        print_success(f"已完成登录流程，目标账号: {target_account}")
+        return target_account
+    raise RuntimeError("登录流程已结束，但未能识别当前活跃账号。")
+
+def switch_gcloud_account(account: Any,  sync_adc: Any=True,  no_browser: Any=False) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        raise RuntimeError("当前环境未找到 gcloud，无法切换账号。")
+
+    target_account = str(account or "").strip()
+    if not target_account:
+        raise ValueError("目标账号不能为空。")
+
+    print_info(f"正在切换 gcloud 活跃账号为 {target_account}...")
+    result = subprocess.run(
+        [gcloud_command, "config", "set", "account", target_account],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        raise RuntimeError(
+            f"切换 gcloud 账号失败: {stderr_summary}。"
+            "如果这是一个尚未登录过的新账号，请使用“登录新账号”功能。"
+        )
+    clear_google_cloud_client_caches()
+
+    if sync_adc:
+        adc_cmd = [gcloud_command, "auth", "application-default", "login", target_account]
+        if no_browser:
+            adc_cmd.append("--no-browser")
+        print_info("正在同步 Application Default Credentials。")
+        print_info("此步骤可能打开浏览器，或要求您按 gcloud 提示完成授权。")
+        result = subprocess.run(adc_cmd)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "gcloud 活跃账号已切换，但同步 ADC 失败。"
+                "请重新执行切换账号，或手动运行 gcloud auth application-default login。"
+            )
+        clear_google_cloud_client_caches()
+
+    print_success(f"已切换到账号: {target_account}")
+    return target_account
 
 def list_active_projects_via_gcloud() -> Any:
     gcloud_command = find_gcloud_command()

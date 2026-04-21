@@ -31,6 +31,7 @@ except ImportError:
 
 from gcp_clients import (
     IMPORT_ERROR_MESSAGE,
+    clear_google_cloud_client_caches,
     compute_v1,
     disks_client,
     ensure_google_cloud_libraries as ensure_client_libraries,

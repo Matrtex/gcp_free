@@ -11,11 +11,15 @@ from gcp_firewall import (
 )
 from gcp_instance import (
     create_instance,
+    get_current_gcloud_account,
     get_instance_cache_key,
+    login_gcloud_account,
     select_gcp_project,
+    select_gcloud_account,
     select_instance,
     select_os_image,
     select_zone,
+    switch_gcloud_account,
 )
 from gcp_remote import (
     deploy_dae_config,
@@ -41,6 +45,7 @@ from gcp_utils import (
     get_default_reroll_state_file,
     handle_doctor,
     print_info,
+    print_success,
     print_warning,
     summarize_exception,
 )
@@ -50,6 +55,10 @@ __all__ = [
     'run_remote_action_for_context',
     'menu_create_action',
     'menu_select_instance_action',
+    'prompt_yes_no',
+    'prompt_optional_text',
+    'menu_login_account_action',
+    'menu_switch_account_action',
     'run_menu_reroll_mode',
     'menu_reroll_action',
     'menu_reroll_ip_action',
@@ -99,6 +108,50 @@ def menu_create_action(context: Any) -> Any:
 
 def menu_select_instance_action(context: Any) -> Any:
     context.current_instance = select_instance(context.project_id)
+
+def prompt_yes_no(question: Any,  default: Any=True) -> Any:
+    suffix = "Y/n" if default else "y/N"
+    choice = input(f"{question} ({suffix}): ").strip().lower()
+    if not choice:
+        return default
+    return choice in {"y", "yes"}
+
+def prompt_optional_text(question: Any) -> Any:
+    return input(f"{question}: ").strip()
+
+def menu_login_account_action(context: Any) -> Any:
+    target_account = prompt_optional_text("请输入要登录的新账号邮箱（留空则在浏览器中自行选择）")
+    no_browser = prompt_yes_no("是否使用无浏览器模式登录", default=False)
+    switched_account = login_gcloud_account(
+        target_account or None,
+        no_browser=no_browser,
+    )
+    context.current_account = switched_account
+    context.project_id = select_gcp_project()
+    context.current_instance = None
+    context.remote_config_cache.clear()
+    print_success(f"新账号已登录并切换为 {switched_account}，当前项目已更新为 {context.project_id}。")
+
+def menu_switch_account_action(context: Any) -> Any:
+    target_account = select_gcloud_account()
+    sync_adc = prompt_yes_no(
+        "是否同时同步 Application Default Credentials（推荐，否则 API 仍可能使用旧账号）",
+        default=True,
+    )
+    no_browser = False
+    if sync_adc:
+        no_browser = prompt_yes_no("是否使用无浏览器模式同步 ADC", default=False)
+
+    switched_account = switch_gcloud_account(
+        target_account,
+        sync_adc=sync_adc,
+        no_browser=no_browser,
+    )
+    context.current_account = switched_account
+    context.project_id = select_gcp_project()
+    context.current_instance = None
+    context.remote_config_cache.clear()
+    print_success(f"账号已切换为 {switched_account}，当前项目已更新为 {context.project_id}。")
 
 def run_menu_reroll_mode(
     context: Any,
@@ -249,11 +302,16 @@ def main() -> Any:
     ensure_libraries_or_exit()
     print("GCP 免费服务器多功能管理工具")
     sys.stdout.flush()
+    current_account = get_current_gcloud_account() or None
+    if current_account:
+        print_info(f"当前 gcloud 账号: {current_account}")
     project_id = select_gcp_project()
-    context = RuntimeContext(project_id=project_id)
+    context = RuntimeContext(project_id=project_id, current_account=current_account)
 
     while True:
         print("\n================================================")
+        if context.current_account:
+            print(f"当前账号: {context.current_account}")
         print(f"当前项目: {context.project_id}")
         if context.current_instance:
             print(f"当前服务器: {context.current_instance.name} ({context.current_instance.zone})")

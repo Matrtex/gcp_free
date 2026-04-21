@@ -186,5 +186,6 @@ class ActionSpec:
 @dataclass
 class RuntimeContext:
     project_id: str
+    current_account: Optional[str] = None
     current_instance: Optional[InstanceInfo] = None
     remote_config_cache: Dict[str, RemoteConfig] = field(default_factory=dict)

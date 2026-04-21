@@ -23,8 +23,11 @@ from gcp_instance import (
     build_setup_dry_run_instance,
     create_instance,
     find_instance_by_name,
+    get_current_gcloud_account,
+    login_gcloud_account,
     list_instances,
     print_instance_list,
+    switch_gcloud_account,
 )
 from gcp_menu import (
     menu_create_action,
@@ -32,12 +35,14 @@ from gcp_menu import (
     menu_deploy_dae_config_action,
     menu_doctor_action,
     menu_firewall_action,
+    menu_login_account_action,
     menu_remote_apt_action,
     menu_remote_dae_action,
     menu_reroll_action,
     menu_reroll_ip_action,
     menu_reroll_ip_amd_action,
     menu_select_instance_action,
+    menu_switch_account_action,
     menu_show_reroll_state_action,
     menu_traffic_monitor_action,
 )
@@ -70,6 +75,8 @@ __all__ = [
     'prepare_cli_remote_instance',
     'handle_create_cli',
     'handle_list_instances_cli',
+    'handle_login_account_cli',
+    'handle_switch_account_cli',
     'handle_reroll_amd_cli',
     'handle_reroll_ip_cli',
     'handle_reroll_ip_amd_cli',
@@ -180,6 +187,27 @@ def handle_list_instances_cli(args: Namespace) -> None:
         print_warning("该项目中没有任何实例。")
         return
     print_instance_list(instances, numbered=False)
+
+def handle_login_account_cli(args: Namespace) -> None:
+    current_account = get_current_gcloud_account()
+    if current_account:
+        print_info(f"登录前当前 gcloud 账号: {current_account}")
+    switched_account = login_gcloud_account(
+        getattr(args, "account", None),
+        no_browser=args.no_browser,
+    )
+    print_success(f"当前 gcloud 账号已登录并切换为: {switched_account}")
+
+def handle_switch_account_cli(args: Namespace) -> None:
+    current_account = get_current_gcloud_account()
+    if current_account:
+        print_info(f"切换前当前 gcloud 账号: {current_account}")
+    switched_account = switch_gcloud_account(
+        args.account,
+        sync_adc=not args.no_sync_adc,
+        no_browser=args.no_browser,
+    )
+    print_success(f"当前 gcloud 账号已切换为: {switched_account}")
 
 def handle_reroll_amd_cli(args: Namespace) -> None:
     instance_info = get_cli_instance(args)
@@ -350,6 +378,8 @@ def handle_setup_cli(args: Namespace) -> None:
 ACTION_SPECS = [
     ActionSpec("create", "新建免费实例", "create", "新建免费实例", menu_create_action, handle_create_cli),
     ActionSpec("select-instance", "选择服务器", None, "选择当前服务器", menu_select_instance_action, None),
+    ActionSpec("login-account", "登录新账号", "login-account", "登录新的 gcloud 账号，并同步 ADC", menu_login_account_action, handle_login_account_cli),
+    ActionSpec("switch-account", "切换已有账号", "switch-account", "切换已登录的 gcloud 账号，并可同步 ADC", menu_switch_account_action, handle_switch_account_cli),
     ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", menu_reroll_action, handle_reroll_amd_cli),
     ActionSpec("reroll-ip", "刷外网 IP", "reroll-ip", "循环重启实例，直到外网 IP 变化", menu_reroll_ip_action, handle_reroll_ip_cli),
     ActionSpec("reroll-ip-amd", "刷外网 IP + AMD CPU", "reroll-ip-amd", "循环重启实例，直到外网 IP 变化且命中 AMD/EPYC", menu_reroll_ip_amd_action, handle_reroll_ip_amd_cli),
@@ -415,6 +445,35 @@ def build_arg_parser() -> Any:
         help="列出项目中的实例",
     )
     list_parser.set_defaults(handler=handle_list_instances_cli)
+
+    login_account_parser = subparsers.add_parser(
+        "login-account",
+        help=ACTION_SPEC_MAP["login-account"].description,
+    )
+    login_account_parser.add_argument("--account", help="可选，目标 Google 账号邮箱；留空则在浏览器中自行选择")
+    login_account_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="使用无浏览器模式登录",
+    )
+    login_account_parser.set_defaults(handler=ACTION_SPEC_MAP["login-account"].cli_handler)
+
+    switch_account_parser = subparsers.add_parser(
+        "switch-account",
+        help=ACTION_SPEC_MAP["switch-account"].description,
+    )
+    switch_account_parser.add_argument("--account", required=True, help="目标 gcloud 账号，例如 demo@gmail.com")
+    switch_account_parser.add_argument(
+        "--no-sync-adc",
+        action="store_true",
+        help="只切换 gcloud 活跃账号，不同步 Application Default Credentials",
+    )
+    switch_account_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="同步 ADC 时使用无浏览器模式",
+    )
+    switch_account_parser.set_defaults(handler=ACTION_SPEC_MAP["switch-account"].cli_handler)
 
     reroll_parser = subparsers.add_parser(
         "reroll-amd",
@@ -569,7 +628,13 @@ def run_cli(args: Any) -> Any:
     if not handler:
         return False
     configure_runtime_logging(getattr(args, "log_file", None))
-    no_library_handlers = {handle_doctor_cli, handle_show_reroll_state_cli, handle_update_cdnip_cli}
+    no_library_handlers = {
+        handle_doctor_cli,
+        handle_show_reroll_state_cli,
+        handle_update_cdnip_cli,
+        handle_login_account_cli,
+        handle_switch_account_cli,
+    }
     if handler not in no_library_handlers and not getattr(args, "dry_run", False):
         ensure_libraries_or_exit()
     handler(args)
