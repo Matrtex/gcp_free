@@ -1,0 +1,157 @@
+name: 清理 GitHub Actions 缓存
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: "删除超过多少天未访问的缓存"
+        required: true
+        default: "7"
+        type: string
+      max_cache_gb:
+        description: "缓存总量超过多少 GB 后按最久未访问优先清理"
+        required: true
+        default: "6"
+        type: string
+  schedule:
+    # GitHub schedule 使用 UTC；这里对应北京时间 03:30。
+    - cron: "30 19 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup-actions-cache
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: 清理缓存
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 删除旧缓存并限制总量
+        uses: actions/github-script@v7
+        env:
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '7' }}
+          MAX_CACHE_GB: ${{ github.event.inputs.max_cache_gb || '6' }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const maxAgeDays = Number.parseFloat(process.env.MAX_AGE_DAYS || "7");
+            const maxCacheGb = Number.parseFloat(process.env.MAX_CACHE_GB || "6");
+
+            if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
+              core.setFailed(`max_age_days 必须是大于等于 0 的数字，当前为 ${process.env.MAX_AGE_DAYS}`);
+              return;
+            }
+            if (!Number.isFinite(maxCacheGb) || maxCacheGb <= 0) {
+              core.setFailed(`max_cache_gb 必须是大于 0 的数字，当前为 ${process.env.MAX_CACHE_GB}`);
+              return;
+            }
+
+            const maxCacheBytes = maxCacheGb * 1024 ** 3;
+            const cutoffMs = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+            const caches = [];
+            for (let page = 1; ; page += 1) {
+              const response = await github.request("GET /repos/{owner}/{repo}/actions/caches", {
+                owner,
+                repo,
+                per_page: 100,
+                page,
+              });
+              caches.push(...response.data.actions_caches);
+              if (response.data.actions_caches.length < 100) {
+                break;
+              }
+            }
+
+            caches.sort((left, right) => {
+              const leftTime = Date.parse(left.last_accessed_at || left.created_at || 0);
+              const rightTime = Date.parse(right.last_accessed_at || right.created_at || 0);
+              return leftTime - rightTime;
+            });
+
+            const formatBytes = (bytes) => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+            const initialBytes = caches.reduce((total, cache) => total + Number(cache.size_in_bytes || 0), 0);
+
+            if (caches.length === 0) {
+              core.info("当前仓库没有可清理的 Actions cache。");
+              await core.summary
+                .addHeading("GitHub Actions 缓存清理")
+                .addRaw("当前仓库没有可清理的 Actions cache。")
+                .write();
+              return;
+            }
+
+            const selected = new Map();
+            let remainingBytes = initialBytes;
+            const selectCache = (cache, reason) => {
+              if (selected.has(cache.id)) {
+                return;
+              }
+              selected.set(cache.id, reason);
+              remainingBytes -= Number(cache.size_in_bytes || 0);
+            };
+
+            for (const cache of caches) {
+              const lastAccessedMs = Date.parse(cache.last_accessed_at || cache.created_at || 0);
+              if (lastAccessedMs <= cutoffMs) {
+                selectCache(cache, `超过 ${maxAgeDays} 天未访问`);
+              }
+            }
+
+            for (const cache of caches) {
+              if (remainingBytes <= maxCacheBytes) {
+                break;
+              }
+              selectCache(cache, `缓存总量超过 ${maxCacheGb} GB，按最久未访问优先清理`);
+            }
+
+            if (selected.size === 0) {
+              core.info(`无需清理。当前缓存 ${caches.length} 个，总量 ${formatBytes(initialBytes)}。`);
+              await core.summary
+                .addHeading("GitHub Actions 缓存清理")
+                .addRaw(`无需清理。当前缓存 ${caches.length} 个，总量 ${formatBytes(initialBytes)}。`)
+                .write();
+              return;
+            }
+
+            let deletedCount = 0;
+            let deletedBytes = 0;
+            let errorCount = 0;
+
+            for (const cache of caches.filter((cache) => selected.has(cache.id))) {
+              const size = Number(cache.size_in_bytes || 0);
+              try {
+                await github.request("DELETE /repos/{owner}/{repo}/actions/caches/{cache_id}", {
+                  owner,
+                  repo,
+                  cache_id: cache.id,
+                });
+                deletedCount += 1;
+                deletedBytes += size;
+                core.info(`已删除 cache ${cache.id}：${cache.key}，${formatBytes(size)}，原因：${selected.get(cache.id)}。`);
+              } catch (error) {
+                if (error.status === 404) {
+                  core.warning(`cache ${cache.id} 已不存在，跳过。`);
+                  continue;
+                }
+                errorCount += 1;
+                core.warning(`删除 cache ${cache.id} 失败：${error.message}`);
+              }
+            }
+
+            await core.summary
+              .addHeading("GitHub Actions 缓存清理")
+              .addRaw(`清理前总量：${formatBytes(initialBytes)}\n\n`)
+              .addRaw(`删除数量：${deletedCount}\n\n`)
+              .addRaw(`释放空间：${formatBytes(deletedBytes)}\n\n`)
+              .addRaw(`预计剩余：${formatBytes(Math.max(initialBytes - deletedBytes, 0))}`)
+              .write();
+
+            if (errorCount > 0) {
+              core.setFailed(`有 ${errorCount} 个 cache 删除失败，请检查 workflow 权限或 API 响应。`);
+            }

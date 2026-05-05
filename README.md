@@ -237,7 +237,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## GitHub Actions
 
-仓库现在包含三条 GitHub Actions：
+仓库现在包含四条 GitHub Actions：
 
 - `自动检查`
   在 `push` 到 `master` 和 `pull_request` 时自动执行语法检查与单元测试。
@@ -249,6 +249,8 @@ python scripts/build_exe.py --clean --version v1.0.0
   2. 推送形如 `v1.2.3` 的 Git tag，自动构建并创建 Release
 - `PR 评论指令触发 EXE 构建`
   在 GitHub PR 评论里发送指令后，自动转发到 EXE 构建/发布工作流
+- `清理 GitHub Actions 缓存`
+  每天北京时间 03:30 自动清理 Actions cache，也支持手动触发；默认删除 7 天未访问的 cache，并在总量超过 6 GB 时按最久未访问优先删除。
 
 如果你想通过命令触发手动构建，可以使用 GitHub CLI：
 
@@ -256,11 +258,18 @@ python scripts/build_exe.py --clean --version v1.0.0
 gh workflow run "构建并发布 Windows EXE" -f version=v1.2.3 -f create_release=true -f draft=false
 ```
 
+如果需要手动清理 Actions cache：
+
+```bash
+gh workflow run "清理 GitHub Actions 缓存" -f max_age_days=7 -f max_cache_gb=6
+```
+
 手动运行工作流时：
 
 - `version` 留空：只构建并上传 artifact，不创建 Release
 - `create_release=true`：会按输入版本创建 GitHub Release，并上传 ZIP 包
 - 发布工作流会先等待当前提交在默认分支上的 `自动检查` 变绿；即使通过了这道门禁，工作流内部仍会再跑一遍语法检查和单元测试
+- 手动构建上传的 Actions artifact 默认保留 30 天；正式 Release 的 ZIP 仍会作为 Release 资产长期保留
 
 评论指令支持：
 

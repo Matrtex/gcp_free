@@ -214,6 +214,7 @@ jobs:
           name: gcp-free-windows-exe-${{ env.BUILD_VERSION }}
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
       - name: 创建 GitHub Release
         if: env.CREATE_RELEASE == 'true'
