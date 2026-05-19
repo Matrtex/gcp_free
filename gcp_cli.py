@@ -3,11 +3,9 @@ from __future__ import annotations
 from gcp_common import (
     ActionSpec,
     Any,
-    FREE_TIER_REGIONS,
     InstanceInfo,
     LOCAL_SCRIPT_FILES,
     Namespace,
-    PAID_REGIONS,
     REGION_OPTIONS,
     RemoteConfig,
     argparse,

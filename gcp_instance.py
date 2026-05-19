@@ -14,7 +14,6 @@ from gcp_common import (
     LOGGER,
     OS_IMAGE_OPTIONS,
     PAID_REGIONS,
-    REGION_OPTIONS,
     clear_google_cloud_client_caches,
     compute_v1,
     find_gcloud_command,
