@@ -12,6 +12,7 @@ from gcp_common import (
     LOG_DIR_NAME,
     LONG_PAUSE_WARNING_THRESHOLD,
     OS_IMAGE_OPTIONS,
+    PAID_REGIONS,
     REGION_OPTIONS,
     REQUIREMENTS_FILE,
     REROLL_RECENT_HISTORY_LIMIT,
@@ -252,11 +253,44 @@ def get_region_config(region: Any) -> Any:
     return get_region_config_from_config(region)
 
 def resolve_zone_for_create(zone: Any=None, region: Any=None, tier: Any=None) -> Any:
+    # 如果提供了 zone，从 zone 提取 region 并验证 tier 要求
     if zone:
+        if tier:
+            # 从 zone 提取 region (zone 格式: region-a, region-b 等)
+            zone_parts = zone.rsplit("-", 1)
+            if len(zone_parts) >= 2 and zone_parts[-1].isalpha():
+                zone_region = zone.rsplit("-", 1)[0]
+            else:
+                zone_region = zone
+
+            free_regions = {item["region"] for item in FREE_TIER_REGIONS}
+            is_free_region = zone_region in free_regions
+
+            if tier == "free" and not is_free_region:
+                free_region_list = ", ".join(item["region"] for item in FREE_TIER_REGIONS)
+                raise ValueError(
+                    f"Zone {zone} (区域 {zone_region}) 不是免费层区域。"
+                    f"使用 --tier=free 时，只能选择免费层区域的 zone，"
+                    f"如: us-west1-a, us-central1-a, us-east1-b 等"
+                )
+
+            if tier == "paid" and is_free_region:
+                print_warning(f"注意: {zone_region} 是免费层区域，使用 --tier=paid 在此区域仍不会产生费用。")
+
         return zone
 
+    # 如果没有提供 region，根据 tier 选择默认区域
     if not region:
-        raise ValueError("非交互创建实例时必须提供 --zone 或 --region。")
+        if tier == "paid":
+            # paid tier 默认使用第一个付费区域
+            region = PAID_REGIONS[0]["region"]
+            print_info(f"--tier=paid 未指定 --region，默认使用付费区域: {region}")
+        elif tier == "free":
+            # free tier 默认使用第一个免费区域
+            region = FREE_TIER_REGIONS[0]["region"]
+            print_info(f"--tier=free 未指定 --region，默认使用免费区域: {region}")
+        else:
+            raise ValueError("非交互创建实例时必须提供 --zone 或 --region，或指定 --tier 以使用默认区域。")
 
     region_config = get_region_config(region)
     if not region_config:
