@@ -341,9 +341,14 @@ def select_from_list(items: Any,  prompt_text: Any,  label_fn: Any,  allow_back:
                 return items[idx]
         print("输入无效，请重试。")
 
-def prompt_manual_project_id() -> Any:
+def prompt_manual_project_id(allow_back: bool = False) -> Any:
+    if allow_back:
+        print("[0] 返回")
     while True:
-        project_id = input("请输入项目 ID: ").strip()
+        prompt = "请输入项目 ID: " if not allow_back else "请输入项目 ID (或 0 返回): "
+        project_id = input(prompt).strip()
+        if allow_back and project_id == "0":
+            return None
         if project_id:
             return project_id
         print("输入不能为空，请重试。")

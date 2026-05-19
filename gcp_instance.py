@@ -133,7 +133,7 @@ def get_current_gcloud_account() -> Any:
             return item["account"]
     return ""
 
-def select_gcloud_account() -> Any:
+def select_gcloud_account(allow_back: bool = False) -> Any:
     print_info("正在读取本机 gcloud 登录账号...")
     accounts = list_gcloud_accounts_via_gcloud()
     if not accounts:
@@ -142,7 +142,10 @@ def select_gcloud_account() -> Any:
         accounts,
         "请选择目标账号",
         lambda item: f"{item['account']} {'[当前激活]' if item['active'] else ''}".strip(),
+        allow_back=allow_back,
     )
+    if selected is None:
+        return None
     return selected["account"]
 
 def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
@@ -300,7 +303,7 @@ def list_instances_via_gcloud(project_id: Any) -> Any:
     raw_instances = json.loads(result.stdout or "[]")
     return [build_instance_info_from_gcloud(item) for item in raw_instances]
 
-def select_gcp_project() -> Any:
+def select_gcp_project(allow_back: bool = False) -> Any:
     print_info("正在扫描您的项目列表...")
     gcloud_command = find_gcloud_command()
     if gcloud_command:
@@ -308,11 +311,15 @@ def select_gcp_project() -> Any:
             print_info("优先通过本机 gcloud 获取项目列表...")
             active_projects = list_active_projects_via_gcloud()
             if active_projects:
-                return prompt_project_selection(
+                result = prompt_project_selection(
                     active_projects,
                     project_id_fn=lambda item: item["project_id"],
                     display_name_fn=lambda item: item["display_name"],
+                    allow_back=allow_back,
                 )
+                if result is None:
+                    return None
+                return result
             print_warning("gcloud 未返回任何活跃项目，将回退到 Resource Manager API。")
         except Exception as e:
             print_warning(f"通过 gcloud 列出项目失败，将回退到 Resource Manager API: {summarize_exception(e)}")
@@ -329,16 +336,20 @@ def select_gcp_project() -> Any:
 
         if not active_projects:
             print_warning("未找到活跃的项目。请手动输入项目 ID。")
-            return prompt_manual_project_id()
+            return prompt_manual_project_id(allow_back=allow_back)
 
-        return prompt_project_selection(
+        result = prompt_project_selection(
             active_projects,
             project_id_fn=lambda item: item.project_id,
             display_name_fn=lambda item: item.display_name,
+            allow_back=allow_back,
         )
+        if result is None:
+            return None
+        return result
     except Exception as e:
         print_warning(f"无法列出项目: {e}。请手动输入项目 ID。")
-        return prompt_manual_project_id()
+        return prompt_manual_project_id(allow_back=allow_back)
 
 def list_zones_for_region(project_id: Any,  region: Any) -> Any:
     zones_client_instance = zones_client()

@@ -150,14 +150,19 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
 def configure_firewall(project_id: Any,  network: Any) -> Any:
     print_info("防火墙规则管理菜单")
     print_info(f"目标网络: {network}")
+    print("[0] 返回")
 
-    choice_in = input("\n[1/2] 是否添加【允许所有入站连接 (0.0.0.0/0)】规则? (y/n): ").strip().lower()
+    choice_in = input("\n[1/2] 是否添加【允许所有入站连接 (0.0.0.0/0)】规则? (y/n/0): ").strip().lower()
+    if choice_in == "0":
+        return
     if choice_in == "y":
         add_allow_all_ingress(project_id, network)
     else:
         print_info("已跳过入站规则配置。")
 
-    choice_out = input("\n[2/2] 是否添加【拒绝对 cdnip.txt 中 IP 的出站连接】规则? (y/n): ").strip().lower()
+    choice_out = input("\n[2/2] 是否添加【拒绝对 cdnip.txt 中 IP 的出站连接】规则? (y/n/0): ").strip().lower()
+    if choice_out == "0":
+        return
     if choice_out == "y":
         ips = read_cdn_ips()
         if ips:

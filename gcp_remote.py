@@ -84,7 +84,10 @@ def pick_remote_method() -> Any:
         return None
 
     if has_gcloud:
-        choice = input("是否使用 gcloud compute ssh 远程执行? (Y/n): ").strip().lower()
+        print("[0] 返回")
+        choice = input("是否使用 gcloud compute ssh 远程执行? (Y/n/0): ").strip().lower()
+        if choice == "0":
+            return None
         if choice in ("", "y", "yes"):
             return RemoteConfig(method="gcloud")
 
@@ -92,10 +95,22 @@ def pick_remote_method() -> Any:
         print_warning("未找到 ssh 命令，无法继续。")
         return None
 
+    print("[0] 返回")
     default_user = getpass.getuser()
-    ssh_user = input(f"请输入 SSH 用户名 (默认 {default_user}): ").strip() or default_user
-    ssh_port = input("请输入 SSH 端口 (默认 22): ").strip() or "22"
-    ssh_key = input("请输入 SSH 私钥路径 (留空表示使用默认密钥): ").strip()
+    ssh_user_input = input(f"请输入 SSH 用户名 (默认 {default_user}, 0 返回): ").strip()
+    if ssh_user_input == "0":
+        return None
+    ssh_user = ssh_user_input or default_user
+    
+    ssh_port_input = input("请输入 SSH 端口 (默认 22, 0 返回): ").strip()
+    if ssh_port_input == "0":
+        return None
+    ssh_port = ssh_port_input or "22"
+    
+    ssh_key_input = input("请输入 SSH 私钥路径 (留空表示使用默认密钥, 0 返回): ").strip()
+    if ssh_key_input == "0":
+        return None
+    ssh_key = ssh_key_input
     return RemoteConfig(method="ssh", user=ssh_user, port=ssh_port, key=ssh_key)
 
 def get_remote_config_for_instance(project_id: Any,  instance_info: Any,  remote_config_cache: Any) -> Any:
