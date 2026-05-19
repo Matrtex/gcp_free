@@ -114,6 +114,8 @@ def menu_select_instance_action(context: Any) -> Any:
     selected = select_instance(context.project_id, allow_back=True)
     if selected is not None:
         context.current_instance = selected
+    else:
+        context.current_instance = None
 
 def prompt_yes_no(question: Any,  default: Any=True) -> Any:
     suffix = "Y/n" if default else "y/N"

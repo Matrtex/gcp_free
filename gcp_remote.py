@@ -278,7 +278,7 @@ def build_remote_exec_command(project_id: Any,  instance_info: Any,  remote_conf
         key_path = remote_config.key
         if key_path:
             cmd += ["-i", key_path]
-        extend_ssh_options(cmd, build_ssh_option_values(include_identities_only=bool(key_path)))
+        cmd = extend_ssh_options(cmd, build_ssh_option_values(include_identities_only=bool(key_path)))
         cmd += [f"{remote_config.user}@{host}", remote_command]
         return cmd
 
@@ -410,7 +410,7 @@ def build_remote_upload_command(project_id: Any,  instance_info: Any,  remote_co
             cmd += ["-P", str(port)]
         if key_path:
             cmd += ["-i", key_path]
-        extend_ssh_options(cmd, ssh_options)
+        cmd = extend_ssh_options(cmd, ssh_options)
         cmd += [local_path, f"{remote_config.user}@{host}:{remote_path}"]
         return cmd
 

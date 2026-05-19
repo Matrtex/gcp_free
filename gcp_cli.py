@@ -583,7 +583,7 @@ def build_arg_parser() -> Any:
         "--region",
         choices=[item["region"] for item in REGION_OPTIONS],
         default="us-west1",
-        help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区",
+        help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区。指定 --tier paid 时如 region 为免费区会自动切换到付费区",
     )
     setup_parser.add_argument(
         "--tier",
