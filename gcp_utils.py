@@ -6,11 +6,13 @@ from gcp_common import (
     DEFAULT_REROLL_IP_AMD_STATE_FILE,
     DEFAULT_REROLL_IP_STATE_FILE,
     DEFAULT_REROLL_STATE_FILE,
+    FREE_TIER_REGIONS,
     IMPORT_ERROR_MESSAGE,
     LOGGER,
     LOG_DIR_NAME,
     LONG_PAUSE_WARNING_THRESHOLD,
     OS_IMAGE_OPTIONS,
+    PAID_REGIONS,
     REGION_OPTIONS,
     REQUIREMENTS_FILE,
     REROLL_RECENT_HISTORY_LIMIT,
@@ -250,7 +252,7 @@ def summarize_text_block( text: Any,  max_lines: Any=SUBPROCESS_ERROR_LINE_LIMIT
 def get_region_config(region: Any) -> Any:
     return get_region_config_from_config(region)
 
-def resolve_zone_for_create(zone: Any=None,  region: Any=None) -> Any:
+def resolve_zone_for_create(zone: Any=None, region: Any=None, tier: Any=None) -> Any:
     if zone:
         return zone
 
@@ -261,6 +263,21 @@ def resolve_zone_for_create(zone: Any=None,  region: Any=None) -> Any:
     if not region_config:
         supported_regions = ", ".join(item["region"] for item in REGION_OPTIONS)
         raise ValueError(f"不支持的区域: {region}。可选值: {supported_regions}")
+
+    # 如果指定了 tier，验证 region 是否符合 tier 要求
+    if tier:
+        free_regions = {item["region"] for item in FREE_TIER_REGIONS}
+        is_free_region = region in free_regions
+
+        if tier == "free" and not is_free_region:
+            free_region_list = ", ".join(item["region"] for item in FREE_TIER_REGIONS)
+            raise ValueError(
+                f"区域 {region} 不是免费层区域。"
+                f"使用 --tier=free 时，只能选择: {free_region_list}"
+            )
+
+        if tier == "paid" and is_free_region:
+            print_warning(f"注意: {region} 是免费层区域，使用 --tier=paid 仍会产生费用吗？不会，此区域免费。")
 
     return region_config["default_zone"]
 

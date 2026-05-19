@@ -4,6 +4,7 @@ from gcp_common import (
     Any,
     CPU_PLATFORM_POLL_INTERVAL,
     CPU_PLATFORM_WAIT_TIMEOUT,
+    FREE_TIER_REGIONS,
     INSTANCE_STATUS_HEARTBEAT_INTERVAL,
     INSTANCE_STATUS_POLL_INTERVAL,
     INSTANCE_STATUS_WAIT_TIMEOUT,
@@ -12,6 +13,7 @@ from gcp_common import (
     InstanceInfo,
     LOGGER,
     OS_IMAGE_OPTIONS,
+    PAID_REGIONS,
     REGION_OPTIONS,
     clear_google_cloud_client_caches,
     compute_v1,
@@ -350,8 +352,45 @@ def list_zones_for_region(project_id: Any,  region: Any) -> Any:
             zones.append(zone.name)
     return sorted(zones)
 
-def select_zone(project_id: Any) -> Any:
-    region_config = select_from_list(REGION_OPTIONS, "请选择部署区域", lambda r: r["name"])
+def select_zone(project_id: Any, tier: str = None) -> Any:
+    # 如果未指定 tier，先让用户选择免费/付费
+    if tier is None:
+        print("\n=== 选择实例类型 ===")
+        print("[1] 免费层实例 (us-west1, us-central1, us-east1 - 免费)")
+        print("[2] 付费区域实例 (其他区域 - 会产生费用)")
+        print("\n注意：付费区域使用相同的 e2-micro 机型，但会根据使用时长计费。")
+        print("     详细定价请参考: https://cloud.google.com/compute/pricing")
+
+        while True:
+            choice = input("\n请输入数字选择 (1-2): ").strip()
+            if choice == "1":
+                tier = "free"
+                break
+            elif choice == "2":
+                # 额外确认付费区域
+                print("\n" + "=" * 50)
+                print_warning("您选择了付费区域！")
+                print("这些区域创建 e2-micro 实例会产生费用。")
+                print("免费层仅适用于: us-west1, us-central1, us-east1")
+                print("=" * 50)
+                confirm = input("\n确认要在付费区域创建实例? (yes/no): ").strip().lower()
+                if confirm in ("yes", "y"):
+                    tier = "paid"
+                    break
+                else:
+                    print("已取消付费区域选择，请重新选择。")
+                    continue
+            else:
+                print("输入无效，请重试。")
+
+    # 根据 tier 选择区域列表
+    if tier == "free":
+        region_options = FREE_TIER_REGIONS
+        region_config = select_from_list(region_options, "请选择免费层区域", lambda r: r["name"])
+    else:
+        region_options = PAID_REGIONS
+        region_config = select_from_list(region_options, "请选择付费区域", lambda r: r["name"])
+
     region = region_config["region"]
     default_zone = region_config["default_zone"]
 

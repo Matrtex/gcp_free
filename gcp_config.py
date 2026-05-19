@@ -19,29 +19,36 @@ FIREWALL_RULES_TO_CLEAN = [
     "deny-cdn-egress-custom",
 ]
 
-# 默认区域与可用区建议，交互式菜单会直接读取这里。
-REGION_OPTIONS = [
-    {"name": "悉尼 (Sydney) [澳洲]", "region": "australia-southeast1", "default_zone": "australia-southeast1-a"},
-    {"name": "墨尔本 (Melbourne) [澳洲]", "region": "australia-southeast2", "default_zone": "australia-southeast2-a"},
-    {"name": "新加坡 (Singapore) [亚洲]", "region": "asia-southeast1", "default_zone": "asia-southeast1-a"},
-    {"name": "东京 (Tokyo) [亚洲]", "region": "asia-northeast1", "default_zone": "asia-northeast1-a"},
-    {"name": "大阪 (Osaka) [亚洲]", "region": "asia-northeast2", "default_zone": "asia-northeast2-a"},
-    {"name": "首尔 (Seoul) [亚洲]", "region": "asia-northeast3", "default_zone": "asia-northeast3-a"},
-    {"name": "香港 (Hong Kong) [亚洲]", "region": "asia-east2", "default_zone": "asia-east2-a"},
-    {"name": "台湾 (Taiwan) [亚洲]", "region": "asia-east1", "default_zone": "asia-east1-a"},
-    {"name": "孟买 (Mumbai) [印度]", "region": "asia-south1", "default_zone": "asia-south1-a"},
-    {"name": "雅加达 (Jakarta) [印尼]", "region": "asia-southeast2", "default_zone": "asia-southeast2-a"},
-    {"name": "俄勒冈 (Oregon) [美国]", "region": "us-west1", "default_zone": "us-west1-b"},
-    {"name": "洛杉矶 (Los Angeles) [美国]", "region": "us-west2", "default_zone": "us-west2-a"},
-    {"name": "盐湖城 (Salt Lake City) [美国]", "region": "us-west3", "default_zone": "us-west3-a"},
-    {"name": "拉斯维加斯 (Las Vegas) [美国]", "region": "us-west4", "default_zone": "us-west4-a"},
-    {"name": "爱荷华 (Iowa) [美国]", "region": "us-central1", "default_zone": "us-central1-f"},
-    {"name": "南卡罗来纳 (South Carolina) [美国]", "region": "us-east1", "default_zone": "us-east1-b"},
-    {"name": "北弗吉尼亚 (N. Virginia) [美国]", "region": "us-east4", "default_zone": "us-east4-a"},
-    {"name": "法兰克福 (Frankfurt) [欧洲]", "region": "europe-west3", "default_zone": "europe-west3-a"},
-    {"name": "伦敦 (London) [欧洲]", "region": "europe-west2", "default_zone": "europe-west2-a"},
-    {"name": "荷兰 (Netherlands) [欧洲]", "region": "europe-west4", "default_zone": "europe-west4-a"},
+# GCP Compute Engine 免费层支持的区域（e2-micro 免费）
+FREE_TIER_REGIONS = [
+    {"name": "俄勒冈 (Oregon) [美国] - 免费层", "region": "us-west1", "default_zone": "us-west1-b"},
+    {"name": "爱荷华 (Iowa) [美国] - 免费层", "region": "us-central1", "default_zone": "us-central1-f"},
+    {"name": "南卡罗来纳 (South Carolina) [美国] - 免费层", "region": "us-east1", "default_zone": "us-east1-b"},
 ]
+
+# 付费区域（同样使用 e2-micro，但会产生费用）
+PAID_REGIONS = [
+    {"name": "悉尼 (Sydney) [澳洲] - 付费", "region": "australia-southeast1", "default_zone": "australia-southeast1-a"},
+    {"name": "墨尔本 (Melbourne) [澳洲] - 付费", "region": "australia-southeast2", "default_zone": "australia-southeast2-a"},
+    {"name": "新加坡 (Singapore) [亚洲] - 付费", "region": "asia-southeast1", "default_zone": "asia-southeast1-a"},
+    {"name": "东京 (Tokyo) [亚洲] - 付费", "region": "asia-northeast1", "default_zone": "asia-northeast1-a"},
+    {"name": "大阪 (Osaka) [亚洲] - 付费", "region": "asia-northeast2", "default_zone": "asia-northeast2-a"},
+    {"name": "首尔 (Seoul) [亚洲] - 付费", "region": "asia-northeast3", "default_zone": "asia-northeast3-a"},
+    {"name": "香港 (Hong Kong) [亚洲] - 付费", "region": "asia-east2", "default_zone": "asia-east2-a"},
+    {"name": "台湾 (Taiwan) [亚洲] - 付费", "region": "asia-east1", "default_zone": "asia-east1-a"},
+    {"name": "孟买 (Mumbai) [印度] - 付费", "region": "asia-south1", "default_zone": "asia-south1-a"},
+    {"name": "雅加达 (Jakarta) [印尼] - 付费", "region": "asia-southeast2", "default_zone": "asia-southeast2-a"},
+    {"name": "洛杉矶 (Los Angeles) [美国] - 付费", "region": "us-west2", "default_zone": "us-west2-a"},
+    {"name": "盐湖城 (Salt Lake City) [美国] - 付费", "region": "us-west3", "default_zone": "us-west3-a"},
+    {"name": "拉斯维加斯 (Las Vegas) [美国] - 付费", "region": "us-west4", "default_zone": "us-west4-a"},
+    {"name": "北弗吉尼亚 (N. Virginia) [美国] - 付费", "region": "us-east4", "default_zone": "us-east4-a"},
+    {"name": "法兰克福 (Frankfurt) [欧洲] - 付费", "region": "europe-west3", "default_zone": "europe-west3-a"},
+    {"name": "伦敦 (London) [欧洲] - 付费", "region": "europe-west2", "default_zone": "europe-west2-a"},
+    {"name": "荷兰 (Netherlands) [欧洲] - 付费", "region": "europe-west4", "default_zone": "europe-west4-a"},
+]
+
+# 所有区域的合并列表（向后兼容）
+REGION_OPTIONS = FREE_TIER_REGIONS + PAID_REGIONS
 
 # 当前支持的系统镜像选项。
 OS_IMAGE_OPTIONS = [
