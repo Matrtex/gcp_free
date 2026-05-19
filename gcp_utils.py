@@ -324,12 +324,17 @@ def extend_gcloud_passthrough_flags(cmd: Any,  flag_name: Any,  option_values: A
 def format_command_for_log(cmd: Any) -> Any:
     return subprocess.list2cmdline([str(part) for part in cmd])
 
-def select_from_list(items: Any,  prompt_text: Any,  label_fn: Any) -> Any:
+def select_from_list(items: Any,  prompt_text: Any,  label_fn: Any,  allow_back: Any=False) -> Any:
     print(f"\n--- {prompt_text} ---")
     for i, item in enumerate(items):
         print(f"[{i+1}] {label_fn(item)}")
+    if allow_back:
+        print("[0] 返回")
     while True:
-        choice = input(f"请输入数字选择 (1-{len(items)}): ").strip()
+        prompt = f"请输入数字选择 (1-{len(items)}): " if not allow_back else f"请输入数字选择 (0-{len(items)}): "
+        choice = input(prompt).strip()
+        if allow_back and choice == "0":
+            return None
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(items):
@@ -343,16 +348,21 @@ def prompt_manual_project_id() -> Any:
             return project_id
         print("输入不能为空，请重试。")
 
-def prompt_project_selection(items: Any,  project_id_fn: Any,  display_name_fn: Any) -> Any:
+def prompt_project_selection(items: Any,  project_id_fn: Any,  display_name_fn: Any,  allow_back: Any=False) -> Any:
     if not items:
         return None
 
     print("\n--- 请选择目标项目 ---")
     for i, item in enumerate(items):
         print(f"[{i+1}] {project_id_fn(item)} ({display_name_fn(item)})")
+    if allow_back:
+        print("[0] 返回")
 
     while True:
-        choice = input(f"请输入数字选择 (1-{len(items)}): ").strip()
+        prompt = f"请输入数字选择 (1-{len(items)}): " if not allow_back else f"请输入数字选择 (0-{len(items)}): "
+        choice = input(prompt).strip()
+        if allow_back and choice == "0":
+            return None
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(items):

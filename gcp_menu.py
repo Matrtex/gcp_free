@@ -101,13 +101,19 @@ def run_remote_action_for_context(context: Any,  action_name: Any,  action_func:
 
 def menu_create_action(context: Any) -> Any:
     zone = select_zone(context.project_id)
-    os_config = select_os_image()
+    if zone is None:
+        return
+    os_config = select_os_image(allow_back=True)
+    if os_config is None:
+        return
     created_instance = create_instance(context.project_id, zone, os_config)
     if created_instance:
         context.current_instance = created_instance
 
 def menu_select_instance_action(context: Any) -> Any:
-    context.current_instance = select_instance(context.project_id)
+    selected = select_instance(context.project_id, allow_back=True)
+    if selected is not None:
+        context.current_instance = selected
 
 def prompt_yes_no(question: Any,  default: Any=True) -> Any:
     suffix = "Y/n" if default else "y/N"
