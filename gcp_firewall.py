@@ -12,6 +12,7 @@ from gcp_common import (
     resolve_asset_path,
     traceback,
 )
+from gcp_instance import list_instances
 from gcp_operations import (
     delete_disk_with_retry,
     delete_firewall_with_retry,
@@ -150,14 +151,19 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
 def configure_firewall(project_id: Any,  network: Any) -> Any:
     print_info("防火墙规则管理菜单")
     print_info(f"目标网络: {network}")
+    print("[0] 返回")
 
-    choice_in = input("\n[1/2] 是否添加【允许所有入站连接 (0.0.0.0/0)】规则? (y/n): ").strip().lower()
+    choice_in = input("\n[1/2] 是否添加【允许所有入站连接 (0.0.0.0/0)】规则? (y/n/0): ").strip().lower()
+    if choice_in == "0":
+        return
     if choice_in == "y":
         add_allow_all_ingress(project_id, network)
     else:
         print_info("已跳过入站规则配置。")
 
-    choice_out = input("\n[2/2] 是否添加【拒绝对 cdnip.txt 中 IP 的出站连接】规则? (y/n): ").strip().lower()
+    choice_out = input("\n[2/2] 是否添加【拒绝对 cdnip.txt 中 IP 的出站连接】规则? (y/n/0): ").strip().lower()
+    if choice_out == "0":
+        return
     if choice_out == "y":
         ips = read_cdn_ips()
         if ips:
@@ -254,8 +260,13 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
     try:
         inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
         for disk in inst.disks:
-            if disk.source:
-                disk_names.append(disk.source.split("/")[-1])
+            if getattr(disk, 'source', None):
+                try:
+                    disk_name = disk.source.split("/")[-1]
+                    if disk_name:
+                        disk_names.append(disk_name)
+                except Exception:
+                    print_warning(f"无法解析磁盘来源: {disk.source}")
     except Exception as e:
         print_warning(f"读取实例信息失败，磁盘清理可能不完整: {e}")
 
@@ -271,11 +282,26 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
             print_warning(f"实例删除失败: {e}")
             return False
 
-    delete_disks_if_needed(project_id, zone, disk_names)
+    disks_deleted = delete_disks_if_needed(project_id, zone, disk_names)
+    if not disks_deleted:
+        print_warning("部分磁盘删除失败，请手动检查控制台。")
 
-    print_info("正在清理防火墙规则...")
-    for rule_name in FIREWALL_RULES_TO_CLEAN:
-        delete_firewall_rule(project_id, rule_name)
+    print_info("正在检查项目中其他实例...")
+    try:
+        remaining_instances = list_instances(project_id)
+        remaining_instances = [
+            inst for inst in remaining_instances
+            if not (inst.name == instance_name and inst.zone == zone)
+        ]
+
+        if not remaining_instances:
+            print_info("项目中无其他实例，正在清理防火墙规则...")
+            for rule_name in FIREWALL_RULES_TO_CLEAN:
+                delete_firewall_rule(project_id, rule_name)
+        else:
+            print_info(f"项目中还有 {len(remaining_instances)} 个其他实例，保留防火墙规则。")
+    except Exception as e:
+        print_warning(f"获取实例列表失败，将跳过防火墙规则清理: {e}")
 
     print_success("清理完成。建议到控制台确认无残留资源。")
     return True

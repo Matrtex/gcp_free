@@ -6,11 +6,13 @@ from gcp_common import (
     DEFAULT_REROLL_IP_AMD_STATE_FILE,
     DEFAULT_REROLL_IP_STATE_FILE,
     DEFAULT_REROLL_STATE_FILE,
+    FREE_TIER_REGIONS,
     IMPORT_ERROR_MESSAGE,
     LOGGER,
     LOG_DIR_NAME,
     LONG_PAUSE_WARNING_THRESHOLD,
     OS_IMAGE_OPTIONS,
+    PAID_REGIONS,
     REGION_OPTIONS,
     REQUIREMENTS_FILE,
     REROLL_RECENT_HISTORY_LIMIT,
@@ -250,17 +252,78 @@ def summarize_text_block( text: Any,  max_lines: Any=SUBPROCESS_ERROR_LINE_LIMIT
 def get_region_config(region: Any) -> Any:
     return get_region_config_from_config(region)
 
-def resolve_zone_for_create(zone: Any=None,  region: Any=None) -> Any:
+def resolve_zone_for_create(zone: Any=None, region: Any=None, tier: Any=None) -> Any:
+    # 如果提供了 zone，从 zone 提取 region 并验证 tier 要求
     if zone:
+        if tier:
+            # 从 zone 提取 region (zone 格式: region-a, region-b 等)
+            zone_parts = zone.rsplit("-", 1)
+            if len(zone_parts) >= 2 and zone_parts[-1].isalpha():
+                zone_region = zone_parts[0]
+            else:
+                zone_region = zone
+
+            free_regions = {item["region"] for item in FREE_TIER_REGIONS}
+            is_free_region = zone_region in free_regions
+
+            if tier == "free" and not is_free_region:
+                free_region_list = ", ".join(item["region"] for item in FREE_TIER_REGIONS)
+                raise ValueError(
+                    f"Zone {zone} (区域 {zone_region}) 不是免费层区域。"
+                    f"使用 --tier=free 时，只能选择免费层区域的 zone，"
+                    f"如: us-west1-a, us-central1-a, us-east1-b 等"
+                )
+
+            if tier == "paid" and is_free_region:
+                print_warning(f"注意: {zone_region} 是免费层区域，使用 --tier=paid 在此区域仍不会产生费用。")
+
         return zone
 
+    # 如果没有提供 region，根据 tier 选择默认区域
     if not region:
-        raise ValueError("非交互创建实例时必须提供 --zone 或 --region。")
+        if tier == "paid":
+            # paid tier 默认使用第一个付费区域
+            if not PAID_REGIONS:
+                raise ValueError("付费区域列表为空，无法选择默认区域。")
+            region = PAID_REGIONS[0]["region"]
+            print_info(f"--tier=paid 未指定 --region，默认使用付费区域: {region}")
+        elif tier == "free":
+            # free tier 默认使用第一个免费区域
+            if not FREE_TIER_REGIONS:
+                raise ValueError("免费区域列表为空，无法选择默认区域。")
+            region = FREE_TIER_REGIONS[0]["region"]
+            print_info(f"--tier=free 未指定 --region，默认使用免费区域: {region}")
+        else:
+            raise ValueError("非交互创建实例时必须提供 --zone 或 --region，或指定 --tier 以使用默认区域。")
 
     region_config = get_region_config(region)
     if not region_config:
         supported_regions = ", ".join(item["region"] for item in REGION_OPTIONS)
         raise ValueError(f"不支持的区域: {region}。可选值: {supported_regions}")
+
+    # 如果指定了 tier，验证 region 是否符合 tier 要求；必要时自动修正
+    if tier:
+        free_regions = {item["region"] for item in FREE_TIER_REGIONS}
+        is_free_region = region in free_regions
+
+        if tier == "free" and not is_free_region:
+            free_region_list = ", ".join(item["region"] for item in FREE_TIER_REGIONS)
+            raise ValueError(
+                f"区域 {region} 不是免费层区域。"
+                f"使用 --tier=free 时，只能选择: {free_region_list}"
+            )
+
+        if tier == "paid" and is_free_region:
+            # 默认 region (us-west1) 是免费区域，与 --tier=paid 冲突；
+            # 自动切换到付费区域默认值，避免在免费区创建付费层实例
+            if not PAID_REGIONS:
+                raise ValueError("付费区域列表为空，无法选择默认区域。")
+            old_region = region
+            region = PAID_REGIONS[0]["region"]
+            region_config = get_region_config(region)
+            if not region_config:
+                raise ValueError(f"默认付费区域 {region} 配置无效。")
+            print_info(f"--tier=paid 但 region {old_region} 是免费区域，已自动切换到: {region}")
 
     return region_config["default_zone"]
 
@@ -295,48 +358,65 @@ def build_ssh_option_values(include_identities_only: Any=False) -> Any:
     return option_values
 
 def extend_ssh_options(cmd: Any,  option_values: Any) -> Any:
+    result = list(cmd)  # 创建副本避免修改原列表
     for option_value in option_values:
-        cmd += ["-o", option_value]
-    return cmd
+        result += ["-o", option_value]
+    return result
 
 def extend_gcloud_passthrough_flags(cmd: Any,  flag_name: Any,  option_values: Any) -> Any:
+    result = list(cmd)  # 创建副本避免修改原列表
     for option_value in option_values:
-        cmd.append(f"{flag_name}=-o")
-        cmd.append(f"{flag_name}={option_value}")
-    return cmd
+        result.append(f"{flag_name}=-o")
+        result.append(f"{flag_name}={option_value}")
+    return result
 
 def format_command_for_log(cmd: Any) -> Any:
     return subprocess.list2cmdline([str(part) for part in cmd])
 
-def select_from_list(items: Any,  prompt_text: Any,  label_fn: Any) -> Any:
+def select_from_list(items: Any,  prompt_text: Any,  label_fn: Any,  allow_back: Any=False) -> Any:
     print(f"\n--- {prompt_text} ---")
     for i, item in enumerate(items):
         print(f"[{i+1}] {label_fn(item)}")
+    if allow_back:
+        print("[0] 返回")
     while True:
-        choice = input(f"请输入数字选择 (1-{len(items)}): ").strip()
+        prompt = f"请输入数字选择 (1-{len(items)}): " if not allow_back else f"请输入数字选择 (0-{len(items)}): "
+        choice = input(prompt).strip()
+        if allow_back and choice == "0":
+            return None
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(items):
                 return items[idx]
         print("输入无效，请重试。")
 
-def prompt_manual_project_id() -> Any:
+def prompt_manual_project_id(allow_back: bool = False) -> Any:
+    if allow_back:
+        print("[0] 返回")
     while True:
-        project_id = input("请输入项目 ID: ").strip()
+        prompt = "请输入项目 ID: " if not allow_back else "请输入项目 ID (或 0 返回): "
+        project_id = input(prompt).strip()
+        if allow_back and project_id == "0":
+            return None
         if project_id:
             return project_id
         print("输入不能为空，请重试。")
 
-def prompt_project_selection(items: Any,  project_id_fn: Any,  display_name_fn: Any) -> Any:
+def prompt_project_selection(items: Any,  project_id_fn: Any,  display_name_fn: Any,  allow_back: Any=False) -> Any:
     if not items:
         return None
 
     print("\n--- 请选择目标项目 ---")
     for i, item in enumerate(items):
         print(f"[{i+1}] {project_id_fn(item)} ({display_name_fn(item)})")
+    if allow_back:
+        print("[0] 返回")
 
     while True:
-        choice = input(f"请输入数字选择 (1-{len(items)}): ").strip()
+        prompt = f"请输入数字选择 (1-{len(items)}): " if not allow_back else f"请输入数字选择 (0-{len(items)}): "
+        choice = input(prompt).strip()
+        if allow_back and choice == "0":
+            return None
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(items):

@@ -4,6 +4,7 @@ from gcp_common import (
     Any,
     CPU_PLATFORM_POLL_INTERVAL,
     CPU_PLATFORM_WAIT_TIMEOUT,
+    FREE_TIER_REGIONS,
     INSTANCE_STATUS_HEARTBEAT_INTERVAL,
     INSTANCE_STATUS_POLL_INTERVAL,
     INSTANCE_STATUS_WAIT_TIMEOUT,
@@ -12,7 +13,7 @@ from gcp_common import (
     InstanceInfo,
     LOGGER,
     OS_IMAGE_OPTIONS,
-    REGION_OPTIONS,
+    PAID_REGIONS,
     clear_google_cloud_client_caches,
     compute_v1,
     find_gcloud_command,
@@ -132,7 +133,7 @@ def get_current_gcloud_account() -> Any:
             return item["account"]
     return ""
 
-def select_gcloud_account() -> Any:
+def select_gcloud_account(allow_back: bool = False) -> Any:
     print_info("正在读取本机 gcloud 登录账号...")
     accounts = list_gcloud_accounts_via_gcloud()
     if not accounts:
@@ -141,7 +142,10 @@ def select_gcloud_account() -> Any:
         accounts,
         "请选择目标账号",
         lambda item: f"{item['account']} {'[当前激活]' if item['active'] else ''}".strip(),
+        allow_back=allow_back,
     )
+    if selected is None:
+        return None
     return selected["account"]
 
 def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
@@ -299,7 +303,7 @@ def list_instances_via_gcloud(project_id: Any) -> Any:
     raw_instances = json.loads(result.stdout or "[]")
     return [build_instance_info_from_gcloud(item) for item in raw_instances]
 
-def select_gcp_project() -> Any:
+def select_gcp_project(allow_back: bool = False) -> Any:
     print_info("正在扫描您的项目列表...")
     gcloud_command = find_gcloud_command()
     if gcloud_command:
@@ -307,11 +311,15 @@ def select_gcp_project() -> Any:
             print_info("优先通过本机 gcloud 获取项目列表...")
             active_projects = list_active_projects_via_gcloud()
             if active_projects:
-                return prompt_project_selection(
+                result = prompt_project_selection(
                     active_projects,
                     project_id_fn=lambda item: item["project_id"],
                     display_name_fn=lambda item: item["display_name"],
+                    allow_back=allow_back,
                 )
+                if result is None:
+                    return None
+                return result
             print_warning("gcloud 未返回任何活跃项目，将回退到 Resource Manager API。")
         except Exception as e:
             print_warning(f"通过 gcloud 列出项目失败，将回退到 Resource Manager API: {summarize_exception(e)}")
@@ -328,16 +336,20 @@ def select_gcp_project() -> Any:
 
         if not active_projects:
             print_warning("未找到活跃的项目。请手动输入项目 ID。")
-            return prompt_manual_project_id()
+            return prompt_manual_project_id(allow_back=allow_back)
 
-        return prompt_project_selection(
+        result = prompt_project_selection(
             active_projects,
             project_id_fn=lambda item: item.project_id,
             display_name_fn=lambda item: item.display_name,
+            allow_back=allow_back,
         )
+        if result is None:
+            return None
+        return result
     except Exception as e:
         print_warning(f"无法列出项目: {e}。请手动输入项目 ID。")
-        return prompt_manual_project_id()
+        return prompt_manual_project_id(allow_back=allow_back)
 
 def list_zones_for_region(project_id: Any,  region: Any) -> Any:
     zones_client_instance = zones_client()
@@ -350,8 +362,51 @@ def list_zones_for_region(project_id: Any,  region: Any) -> Any:
             zones.append(zone.name)
     return sorted(zones)
 
-def select_zone(project_id: Any) -> Any:
-    region_config = select_from_list(REGION_OPTIONS, "请选择部署区域", lambda r: r["name"])
+def select_zone(project_id: Any, tier: str = None) -> Any:
+    # 如果未指定 tier，先让用户选择免费/付费
+    if tier is None:
+        print("\n=== 选择实例类型 ===")
+        print("[1] 免费层实例 (us-west1, us-central1, us-east1 - 免费)")
+        print("[2] 付费区域实例 (其他区域 - 会产生费用)")
+        print("[0] 返回")
+        print("\n注意：付费区域使用相同的 e2-micro 机型，但会根据使用时长计费。")
+        print("     详细定价请参考: https://cloud.google.com/compute/pricing")
+
+        while True:
+            choice = input("\n请输入数字选择 (0-2): ").strip()
+            if choice == "0":
+                return None
+            if choice == "1":
+                tier = "free"
+                break
+            elif choice == "2":
+                # 额外确认付费区域
+                print("\n" + "=" * 50)
+                print_warning("您选择了付费区域！")
+                print("这些区域创建 e2-micro 实例会产生费用。")
+                print("免费层仅适用于: us-west1, us-central1, us-east1")
+                print("=" * 50)
+                confirm = input("\n确认要在付费区域创建实例? (yes/no): ").strip().lower()
+                if confirm in ("yes", "y"):
+                    tier = "paid"
+                    break
+                else:
+                    print("已取消付费区域选择，请重新选择。")
+                    continue
+            else:
+                print("输入无效，请重试。")
+
+    # 根据 tier 选择区域列表
+    if tier == "free":
+        region_options = FREE_TIER_REGIONS
+        region_config = select_from_list(region_options, "请选择免费层区域", lambda r: r["name"], allow_back=True)
+    else:
+        region_options = PAID_REGIONS
+        region_config = select_from_list(region_options, "请选择付费区域", lambda r: r["name"], allow_back=True)
+
+    if region_config is None:
+        return None
+
     region = region_config["region"]
     default_zone = region_config["default_zone"]
 
@@ -366,10 +421,10 @@ def select_zone(project_id: Any) -> Any:
         print_warning(f"未获取到可用区列表，使用默认可用区 {default_zone}。")
         return default_zone
 
-    return select_from_list(zones, f"请选择可用区 ({region})", lambda z: z)
+    return select_from_list(zones, f"请选择可用区 ({region})", lambda z: z, allow_back=True)
 
-def select_os_image() -> Any:
-    return select_from_list(OS_IMAGE_OPTIONS, "请选择操作系统", lambda o: o["name"])
+def select_os_image(allow_back: bool = False) -> Any:
+    return select_from_list(OS_IMAGE_OPTIONS, "请选择操作系统", lambda o: o["name"], allow_back=allow_back)
 
 def create_instance(project_id: Any,  zone: Any,  os_config: Any,  instance_name: Any="free-tier-vm") -> Any:
     instance_client = instances_client()
@@ -520,7 +575,7 @@ def find_instance_by_name(project_id: Any,  instance_name: Any,  zone: Any=None)
 
     return matched_instances[0]
 
-def select_instance(project_id: Any) -> Any:
+def select_instance(project_id: Any, allow_back: bool = False) -> Any:
     instances = list_instances(project_id)
     if not instances:
         print_warning("该项目中没有任何实例！")
@@ -528,9 +583,14 @@ def select_instance(project_id: Any) -> Any:
 
     print("\n--- 请选择目标服务器 ---")
     print_instance_list(instances, numbered=True)
+    if allow_back:
+        print("[0] 返回")
 
     while True:
-        choice = input(f"请输入数字选择 (1-{len(instances)}): ").strip()
+        prompt = f"请输入数字选择 (1-{len(instances)}): " if not allow_back else f"请输入数字选择 (0-{len(instances)}): "
+        choice = input(prompt).strip()
+        if allow_back and choice == "0":
+            return None
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(instances):

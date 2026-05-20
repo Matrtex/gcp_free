@@ -170,7 +170,7 @@ def prepare_cli_remote_instance(args: Any) -> Any:
     return remote_instance, remote_config
 
 def handle_create_cli(args: Namespace) -> None:
-    zone = resolve_zone_for_create(args.zone, args.region)
+    zone = resolve_zone_for_create(args.zone, args.region, getattr(args, "tier", None))
     os_config = resolve_os_config(args.os)
     created_instance = create_instance(
         args.project_id,
@@ -325,7 +325,7 @@ def run_setup_remote_step(args: Namespace,  instance_info: InstanceInfo,  remote
     return remote_instance
 
 def handle_setup_cli(args: Namespace) -> None:
-    zone = resolve_zone_for_create(args.zone, args.region)
+    zone = resolve_zone_for_create(args.zone, args.region, getattr(args, "tier", None))
     os_config = resolve_os_config(args.os)
     instance_name = args.instance_name
 
@@ -376,7 +376,7 @@ def handle_setup_cli(args: Namespace) -> None:
     print_success("setup 全流程执行完成。")
 
 ACTION_SPECS = [
-    ActionSpec("create", "新建免费实例", "create", "新建免费实例", menu_create_action, handle_create_cli),
+    ActionSpec("create", "新建实例", "create", "新建实例（可选择免费层或付费区域）", menu_create_action, handle_create_cli),
     ActionSpec("select-instance", "选择服务器", None, "选择当前服务器", menu_select_instance_action, None),
     ActionSpec("login-account", "登录新账号", "login-account", "登录新的 gcloud 账号，并同步 ADC", menu_login_account_action, handle_login_account_cli),
     ActionSpec("switch-account", "切换已有账号", "switch-account", "切换已登录的 gcloud 账号，并可同步 ADC", menu_switch_account_action, handle_switch_account_cli),
@@ -389,7 +389,7 @@ ACTION_SPECS = [
     ActionSpec("dae", "安装 dae", None, "上传并执行 dae.sh", menu_remote_dae_action, None),
     ActionSpec("dae-config", "上传 config.dae 并启用 dae", "deploy-dae-config", "上传 dae 配置", menu_deploy_dae_config_action, handle_deploy_dae_config_cli),
     ActionSpec("traffic-monitor", "安装流量监控脚本（仅适配 Debian）", None, "安装流量监控脚本", menu_traffic_monitor_action, None),
-    ActionSpec("delete-resources", "删除当前免费资源", "delete-resources", "删除实例、磁盘和规则", menu_delete_resources_action, handle_delete_resources_cli),
+    ActionSpec("delete-resources", "删除当前资源", "delete-resources", "删除实例、磁盘和规则", menu_delete_resources_action, handle_delete_resources_cli),
     ActionSpec("doctor", "环境预检", "doctor", "检查本地与云端运行环境", menu_doctor_action, handle_doctor_cli),
 ]
 
@@ -429,6 +429,11 @@ def build_arg_parser() -> Any:
         "--region",
         choices=[item["region"] for item in REGION_OPTIONS],
         help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区",
+    )
+    create_parser.add_argument(
+        "--tier",
+        choices=["free", "paid"],
+        help="选择实例层级: free=免费层区域(仅us-west1/us-central1/us-east1), paid=付费区域(其他所有区域)",
     )
     create_parser.add_argument(
         "--os",
@@ -578,7 +583,12 @@ def build_arg_parser() -> Any:
         "--region",
         choices=[item["region"] for item in REGION_OPTIONS],
         default="us-west1",
-        help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区",
+        help="实例部署区域；未提供 --zone 时会使用该区域的默认可用区。指定 --tier paid 时如 region 为免费区会自动切换到付费区",
+    )
+    setup_parser.add_argument(
+        "--tier",
+        choices=["free", "paid"],
+        help="选择实例层级: free=免费层区域, paid=付费区域（会产生费用）",
     )
     setup_parser.add_argument(
         "--os",

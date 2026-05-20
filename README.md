@@ -63,7 +63,7 @@ gcloud auth application-default login
 .\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
 .\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
 .\start.ps1 doctor --project-id <你的项目ID>
-.\start.ps1 setup --project-id <你的项目ID> --region us-west1 --skip-reroll
+.\start.ps1 setup --project-id <你的项目ID> --skip-reroll
 .\start.ps1 status --project-id <你的项目ID> --instance <实例名> --zone <可用区>
 ```
 
@@ -186,11 +186,25 @@ python scripts/build_exe.py --clean --version v1.0.0
 一键部署流程：
 
 ```powershell
+# 默认在免费区域（us-west1）创建实例
+.\start.ps1 setup --project-id <你的项目ID>
+
+# 显式指定免费区域
 .\start.ps1 setup --project-id <你的项目ID> --region us-west1
-.\start.ps1 setup --project-id <你的项目ID> --region us-west1 --skip-reroll
+
+# 在付费区域创建实例（自动选择 australia-southeast1）
+.\start.ps1 setup --project-id <你的项目ID> --tier paid
+
+# 直接指定可用区（无需同时传 --region/--tier）
+.\start.ps1 setup --project-id <你的项目ID> --zone asia-southeast1-a
+
+# 跳过刷 AMD/EPYC
+.\start.ps1 setup --project-id <你的项目ID> --skip-reroll
 ```
 
 `setup` 会串联创建实例、刷 AMD/EPYC、防火墙、换源、安装 dae、上传 `config.dae` 和安装流量监控脚本。默认流量监控限额来自 `gcp_config.py` 的 `TRAFFIC_LIMIT_GB`。
+
+> **注意**：`--zone` 是最权威的参数，传了 zone 时 `--region` 和 `--tier` 会被忽略。未传 zone 时，默认使用免费区域 `us-west1`；指定 `--tier paid` 时会自动切换到付费区域。
 
 远程状态仪表盘：
 
