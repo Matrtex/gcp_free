@@ -59,6 +59,7 @@ from gcp_utils import (
 __all__ = [
     'list_gcloud_accounts_via_gcloud',
     'get_current_gcloud_account',
+    'clear_adc_account_cache',
     'get_current_adc_account',
     'warn_if_adc_account_mismatch',
     'sync_adc_account',
@@ -94,6 +95,15 @@ __all__ = [
     'ensure_instance_stopped',
     'build_setup_dry_run_instance',
 ]
+
+_ADC_ACCOUNT_CACHE = {
+    "loaded": False,
+    "value": "",
+}
+
+def clear_adc_account_cache() -> Any:
+    _ADC_ACCOUNT_CACHE["loaded"] = False
+    _ADC_ACCOUNT_CACHE["value"] = ""
 
 def list_gcloud_accounts_via_gcloud() -> Any:
     gcloud_command = find_gcloud_command()
@@ -142,16 +152,24 @@ def get_current_gcloud_account() -> Any:
             return item["account"]
     return ""
 
-def get_current_adc_account() -> Any:
+def get_current_adc_account(refresh: bool = False) -> Any:
+    if _ADC_ACCOUNT_CACHE["loaded"] and not refresh:
+        return _ADC_ACCOUNT_CACHE["value"]
+    if refresh:
+        clear_adc_account_cache()
+
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
         return ""
     adc_account, _error = get_adc_account_email(gcloud_command)
+    if adc_account:
+        _ADC_ACCOUNT_CACHE["loaded"] = True
+        _ADC_ACCOUNT_CACHE["value"] = adc_account
     return adc_account
 
-def warn_if_adc_account_mismatch(current_account: Any=None) -> Any:
+def warn_if_adc_account_mismatch(current_account: Any=None, adc_account: Any=None) -> Any:
     gcloud_account = str(current_account or get_current_gcloud_account() or "").strip()
-    adc_account = str(get_current_adc_account() or "").strip()
+    adc_account = str(get_current_adc_account() if adc_account is None else adc_account or "").strip()
     if not gcloud_account or not adc_account:
         return True
     if gcloud_account.lower() == adc_account.lower():
@@ -173,8 +191,9 @@ def sync_adc_account(account: Any, no_browser: Any = False, quota_project: Any =
     if not target_account:
         raise ValueError("同步 ADC 时目标账号不能为空。")
 
-    current_adc_account = str(get_current_adc_account() or "").strip()
+    current_adc_account = str(get_current_adc_account(refresh=True) or "").strip()
     if current_adc_account.lower() == target_account.lower():
+        clear_google_cloud_client_caches()
         print_info(f"ADC 已匹配当前账号: {target_account}")
         return target_account
 
@@ -202,8 +221,14 @@ def sync_adc_account(account: Any, no_browser: Any = False, quota_project: Any =
             f"gcloud auth application-default login {target_account}。"
         )
     clear_google_cloud_client_caches()
+    clear_adc_account_cache()
 
-    verified_account = str(get_current_adc_account() or "").strip()
+    verified_account = str(get_current_adc_account(refresh=True) or "").strip()
+    if not verified_account:
+        raise RuntimeError(
+            "ADC 同步后仍无法确认账号。请重新执行切换账号，或手动运行 "
+            f"gcloud auth application-default login {target_account}。"
+        )
     if verified_account and verified_account.lower() != target_account.lower():
         raise RuntimeError(
             f"ADC 同步后仍为 {verified_account}，不是目标账号 {target_account}。"
@@ -288,11 +313,14 @@ def prepare_gcloud_context(
         switched_account = get_current_gcloud_account()
         if switched_account:
             print_info(f"使用当前 gcloud 账号: {switched_account}")
-        warn_if_adc_account_mismatch(switched_account)
+        adc_account = str(get_current_adc_account() or "").strip()
+        adc_matches_gcloud = warn_if_adc_account_mismatch(switched_account, adc_account=adc_account)
         if project_id:
             set_gcloud_project(project_id)
-            if set_quota_project and get_current_adc_account():
+            if set_quota_project and adc_matches_gcloud and adc_account:
                 set_adc_quota_project(project_id)
+            elif set_quota_project and not adc_matches_gcloud:
+                print_info("已暂缓设置 ADC quota project；请先同步 ADC 到当前 gcloud 账号。")
     return switched_account
 
 def select_startup_gcloud_account() -> Any:
@@ -358,6 +386,7 @@ def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
         )
 
     clear_google_cloud_client_caches()
+    clear_adc_account_cache()
     current_account = str(get_current_gcloud_account() or "").strip()
     if current_account:
         warn_if_adc_account_mismatch(current_account)
@@ -386,6 +415,8 @@ def switch_gcloud_account(
     current_account = str(get_current_gcloud_account() or "").strip()
     if current_account.lower() == target_account.lower():
         print_info(f"gcloud 活跃账号已是 {target_account}。")
+        clear_google_cloud_client_caches()
+        clear_adc_account_cache()
     else:
         print_info(f"正在切换 gcloud 活跃账号为 {target_account}...")
         result = subprocess.run(
@@ -402,6 +433,7 @@ def switch_gcloud_account(
                 "如果这是一个尚未登录过的新账号，请使用“登录新账号”功能。"
             )
         clear_google_cloud_client_caches()
+        clear_adc_account_cache()
 
     if project_id:
         set_gcloud_project(project_id)
@@ -409,10 +441,13 @@ def switch_gcloud_account(
     if sync_adc:
         sync_adc_account(target_account, no_browser=no_browser, quota_project=project_id)
 
-    if project_id and set_quota_project and get_current_adc_account():
+    adc_account = str(get_current_adc_account() or "").strip()
+    if project_id and set_quota_project and adc_account.lower() == target_account.lower():
         set_adc_quota_project(project_id)
+    elif project_id and set_quota_project and adc_account:
+        print_info("已暂缓设置 ADC quota project；ADC 账号与目标 gcloud 账号不一致。")
 
-    warn_if_adc_account_mismatch(target_account)
+    warn_if_adc_account_mismatch(target_account, adc_account=adc_account)
     print_success(f"已切换到账号: {target_account}")
     return target_account
 
@@ -529,9 +564,9 @@ def select_gcp_project(allow_back: bool = False, account: Any = None) -> Any:
             print_warning(f"通过 gcloud 列出项目失败，将回退到 Resource Manager API: {summarize_exception(e)}")
 
     adc_account = str(get_current_adc_account() or "").strip()
-    if target_account and adc_account and target_account.lower() != adc_account.lower():
+    if target_account and (not adc_account or target_account.lower() != adc_account.lower()):
         print_warning(
-            f"当前选择账号是 {target_account}，但 ADC 账号是 {adc_account}。"
+            f"当前选择账号是 {target_account}，但 ADC 账号是 {adc_account or '未确认'}。"
             "为避免混入其它账号的项目，已跳过 Resource Manager API 回退。"
         )
         return prompt_manual_project_id(allow_back=allow_back)

@@ -138,7 +138,7 @@ def menu_login_account_action(context: Any) -> Any:
         no_browser=no_browser,
     )
     context.current_account = switched_account
-    context.project_id = select_gcp_project()
+    context.project_id = select_gcp_project(account=switched_account)
     context.current_instance = None
     context.remote_config_cache.clear()
     print_success(f"新账号已登录并切换为 {switched_account}，当前项目已更新为 {context.project_id}。")
@@ -159,7 +159,7 @@ def menu_switch_account_action(context: Any) -> Any:
         no_browser=no_browser,
     )
     context.current_account = switched_account
-    context.project_id = select_gcp_project()
+    context.project_id = select_gcp_project(account=switched_account)
     context.current_instance = None
     context.remote_config_cache.clear()
     print_success(f"账号已切换为 {switched_account}，当前项目已更新为 {context.project_id}。")

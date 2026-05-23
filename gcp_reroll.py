@@ -246,6 +246,17 @@ def is_oauth_timeout_error(exc: Any) -> Any:
 
 def is_permission_denied_error(exc: Any) -> Any:
     message = str(exc).lower()
+    compute_markers = [
+        "compute.googleapis.com",
+        "/compute/v1/",
+        "required 'compute.",
+        "permission 'compute.",
+        "compute.instances.",
+    ]
+    has_compute_context = any(marker in message for marker in compute_markers)
+    if not has_compute_context:
+        return False
+
     permission_markers = [
         " 403 ",
         "403 get ",

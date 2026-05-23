@@ -103,7 +103,7 @@ def get_adc_account_email_from_token(access_token: str, timeout: int = 10) -> Tu
     return "", "tokeninfo 未返回 ADC 账号邮箱"
 
 
-def get_adc_account_email(gcloud_path: str, timeout: int = 10) -> Tuple[str, str]:
+def get_adc_account_email(gcloud_path: str, timeout: int = 30) -> Tuple[str, str]:
     ok, stdout, stderr = _run_command(
         [gcloud_path, "auth", "application-default", "print-access-token"],
         timeout=timeout,

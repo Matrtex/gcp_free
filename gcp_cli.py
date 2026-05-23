@@ -23,6 +23,7 @@ from gcp_instance import (
     build_setup_dry_run_instance,
     create_instance,
     find_instance_by_name,
+    get_current_adc_account,
     get_current_gcloud_account,
     login_gcloud_account,
     list_instances,
@@ -155,6 +156,23 @@ def prepare_cli_account_context(args: Any) -> Any:
         return None
     if not project_id and not account:
         return None
+
+    if project_id and not account:
+        gcloud_account = str(get_current_gcloud_account() or "").strip()
+        adc_account = str(get_current_adc_account() or "").strip()
+        if not gcloud_account:
+            raise RuntimeError(
+                "非交互 CLI 无法确认当前 gcloud 账号。"
+                "为避免串账号已停止执行，请添加 --account <你的Google账号邮箱>。"
+            )
+        if not adc_account or gcloud_account.lower() != adc_account.lower():
+            adc_text = adc_account or "未确认"
+            raise RuntimeError(
+                f"当前 gcloud 账号是 {gcloud_account}，但 ADC 账号是 {adc_text}。"
+                "非交互 CLI 为避免串账号已停止执行，请添加 "
+                f"--account {gcloud_account}，或先运行 gcloud auth application-default login "
+                f"{gcloud_account}。"
+            )
 
     return prepare_gcloud_context(
         project_id=project_id,

@@ -7,6 +7,7 @@ import subprocess
 
 from gcp import (
     classify_reroll_exception,
+    clear_adc_account_cache,
     configure_firewall_non_interactive,
     find_instance_by_name,
     ensure_instance_running,
@@ -31,11 +32,15 @@ from gcp import (
     list_active_projects_via_gcloud,
     list_gcloud_accounts_via_gcloud,
     parse_args,
+    prepare_cli_account_context,
     record_reroll_exception,
     read_cdn_ips,
     resolve_os_config,
+    select_gcp_project,
     select_startup_gcloud_account,
     switch_gcloud_account,
+    sync_adc_account,
+    menu_switch_account_action,
     sleep_and_detect_pause,
     summarize_text_block,
     warn_if_long_pause,
@@ -47,6 +52,9 @@ from gcp_state import save_json_state
 
 
 class GcpHelpersTestCase(unittest.TestCase):
+    def setUp(self):
+        clear_adc_account_cache()
+
     def test_resolve_os_config_supports_alias(self):
         config = resolve_os_config("ubuntu")
         self.assertEqual(config["family"], "ubuntu-2204-lts")
@@ -220,6 +228,25 @@ class GcpHelpersTestCase(unittest.TestCase):
         )
         self.assertEqual(mock_clear_caches.call_count, 2)
 
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch("gcp_instance.get_adc_account_email", return_value=("demo@example.com", ""))
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_sync_adc_account_clears_client_cache_when_already_matched(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        _mock_adc_account,
+        mock_clear_caches,
+        _mock_print_info,
+    ):
+        synced_account = sync_adc_account("demo@example.com")
+
+        self.assertEqual(synced_account, "demo@example.com")
+        mock_clear_caches.assert_called_once()
+        mock_run.assert_not_called()
+
     @patch("gcp_instance.get_current_gcloud_account", return_value=None)
     @patch("gcp_instance.get_adc_account_email", return_value=("demo@example.com", ""))
     @patch("gcp_instance.clear_google_cloud_client_caches")
@@ -240,6 +267,29 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(switched_account, "demo@example.com")
         first_cmd = mock_run.call_args_list[0].args[0]
         self.assertEqual(first_cmd, ["gcloud", "config", "set", "account", "demo@example.com"])
+
+    @patch("gcp_instance.print_success")
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.get_current_gcloud_account", return_value="demo@example.com")
+    @patch("gcp_instance.get_adc_account_email", return_value=("demo@example.com", ""))
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_gcloud_account_clears_caches_when_already_active(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        mock_clear_caches,
+        _mock_adc_account,
+        _mock_current_account,
+        _mock_print_info,
+        _mock_print_success,
+    ):
+        switched_account = switch_gcloud_account("demo@example.com", sync_adc=False)
+
+        self.assertEqual(switched_account, "demo@example.com")
+        mock_clear_caches.assert_called_once()
+        mock_run.assert_not_called()
 
     @patch("gcp_instance.get_current_gcloud_account", return_value="new@example.com")
     @patch("gcp_instance.get_adc_account_email", return_value=("new@example.com", ""))
@@ -302,6 +352,70 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(projects[0]["project_id"], "demo-project")
         command = mock_run.call_args.args[0]
         self.assertIn("--account=demo@example.com", command)
+
+    @patch("gcp_menu.print_success")
+    @patch("gcp_menu.select_gcp_project", return_value="demo-project")
+    @patch("gcp_menu.switch_gcloud_account", return_value="second@example.com")
+    @patch("gcp_menu.prompt_yes_no", return_value=False)
+    @patch("gcp_menu.select_gcloud_account", return_value="second@example.com")
+    def test_menu_switch_account_selects_project_for_switched_account(
+        self,
+        _mock_select_account,
+        _mock_prompt_yes_no,
+        _mock_switch_account,
+        mock_select_project,
+        _mock_print_success,
+    ):
+        context = SimpleNamespace(
+            current_account="first@example.com",
+            project_id="old-project",
+            current_instance=object(),
+            remote_config_cache={"old": object()},
+        )
+
+        menu_switch_account_action(context)
+
+        self.assertEqual(context.current_account, "second@example.com")
+        self.assertEqual(context.project_id, "demo-project")
+        self.assertIsNone(context.current_instance)
+        self.assertEqual(context.remote_config_cache, {})
+        mock_select_project.assert_called_once_with(account="second@example.com")
+
+    @patch("gcp_cli.get_current_adc_account", return_value="adc@example.com")
+    @patch("gcp_cli.get_current_gcloud_account", return_value="gcloud@example.com")
+    def test_prepare_cli_account_context_rejects_adc_mismatch_without_account(
+        self,
+        _mock_gcloud_account,
+        _mock_adc_account,
+    ):
+        args = SimpleNamespace(project_id="demo-project", account=None, dry_run=False)
+
+        with self.assertRaisesRegex(RuntimeError, "--account gcloud@example.com"):
+            prepare_cli_account_context(args)
+
+    @patch("gcp_cli.get_current_adc_account", return_value="")
+    @patch("gcp_cli.get_current_gcloud_account", return_value="gcloud@example.com")
+    def test_prepare_cli_account_context_rejects_unknown_adc_without_account(
+        self,
+        _mock_gcloud_account,
+        _mock_adc_account,
+    ):
+        args = SimpleNamespace(project_id="demo-project", account=None, dry_run=False)
+
+        with self.assertRaisesRegex(RuntimeError, "ADC 账号是 未确认"):
+            prepare_cli_account_context(args)
+
+    @patch("gcp_cli.get_current_adc_account", return_value="adc@example.com")
+    @patch("gcp_cli.get_current_gcloud_account", return_value="")
+    def test_prepare_cli_account_context_rejects_unknown_gcloud_without_account(
+        self,
+        _mock_gcloud_account,
+        _mock_adc_account,
+    ):
+        args = SimpleNamespace(project_id="demo-project", account=None, dry_run=False)
+
+        with self.assertRaisesRegex(RuntimeError, "无法确认当前 gcloud 账号"):
+            prepare_cli_account_context(args)
 
     def test_is_target_cpu_accepts_amd_and_epyc(self):
         self.assertTrue(is_target_cpu("AMD EPYC Milan"))
@@ -382,18 +496,131 @@ class GcpHelpersTestCase(unittest.TestCase):
             "403 GET https://compute.googleapis.com/compute/v1/projects/demo/zones/us-west1-b/instances/vm-1: "
             "Required 'compute.instances.get' permission for 'projects/demo/zones/us-west1-b/instances/vm-1'"
         )
-        hard_exc = RuntimeError("permission denied")
+        local_permission_exc = RuntimeError("permission denied")
+        compute_permission_exc = RuntimeError(
+            "403 Permission denied for https://compute.googleapis.com/compute/v1/projects/demo"
+        )
 
         self.assertEqual(classify_reroll_exception(oauth_exc), "oauth_timeout")
         self.assertEqual(classify_reroll_exception(stop_exc), "instance_stuck")
         self.assertEqual(classify_reroll_exception(compute_exc), "compute_timeout")
         self.assertEqual(classify_reroll_exception(permission_exc), "permission_denied")
-        self.assertEqual(classify_reroll_exception(hard_exc), "permission_denied")
+        self.assertEqual(classify_reroll_exception(compute_permission_exc), "permission_denied")
+        self.assertEqual(classify_reroll_exception(local_permission_exc), "hard_failure")
 
     @patch("gcp_instance.get_adc_account_email", return_value=("adc@example.com", ""))
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
     def test_get_current_adc_account_reads_adc_identity(self, _mock_find_gcloud, _mock_adc_email):
         self.assertEqual(get_current_adc_account(), "adc@example.com")
+
+    @patch("gcp_instance.get_adc_account_email", return_value=("adc@example.com", ""))
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_get_current_adc_account_uses_process_cache(self, _mock_find_gcloud, mock_adc_email):
+        self.assertEqual(get_current_adc_account(), "adc@example.com")
+        self.assertEqual(get_current_adc_account(), "adc@example.com")
+        mock_adc_email.assert_called_once_with("gcloud")
+
+        clear_adc_account_cache()
+        self.assertEqual(get_current_adc_account(), "adc@example.com")
+        self.assertEqual(mock_adc_email.call_count, 2)
+
+    @patch(
+        "gcp_instance.get_adc_account_email",
+        side_effect=[("", "tokeninfo timeout"), ("adc@example.com", "")],
+    )
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_get_current_adc_account_does_not_cache_unknown_identity(self, _mock_find_gcloud, mock_adc_email):
+        self.assertEqual(get_current_adc_account(), "")
+        self.assertEqual(get_current_adc_account(), "adc@example.com")
+        self.assertEqual(mock_adc_email.call_count, 2)
+
+    @patch(
+        "gcp_instance.get_adc_account_email",
+        side_effect=[
+            ("old@example.com", ""),
+            ("", "tokeninfo timeout"),
+            ("new@example.com", ""),
+        ],
+    )
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_get_current_adc_account_refresh_clears_stale_cache(self, _mock_find_gcloud, mock_adc_email):
+        self.assertEqual(get_current_adc_account(), "old@example.com")
+        self.assertEqual(get_current_adc_account(refresh=True), "")
+        self.assertEqual(get_current_adc_account(), "new@example.com")
+        self.assertEqual(mock_adc_email.call_count, 3)
+
+    @patch("gcp_instance.print_success")
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.set_gcloud_project")
+    @patch("gcp_instance.set_adc_quota_project")
+    @patch("gcp_instance.get_adc_account_email", return_value=("other@example.com", ""))
+    @patch("gcp_instance.get_current_gcloud_account", return_value="demo@example.com")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_switch_gcloud_account_skips_quota_project_when_adc_differs(
+        self,
+        _mock_find_gcloud,
+        _mock_current_account,
+        _mock_adc_account,
+        mock_set_quota_project,
+        mock_set_gcloud_project,
+        _mock_print_info,
+        _mock_print_success,
+    ):
+        switched_account = switch_gcloud_account(
+            "demo@example.com",
+            sync_adc=False,
+            project_id="demo-project",
+        )
+
+        self.assertEqual(switched_account, "demo@example.com")
+        mock_set_gcloud_project.assert_called_once_with("demo-project")
+        mock_set_quota_project.assert_not_called()
+
+    @patch("gcp_instance.get_current_gcloud_account", return_value="old@example.com")
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch(
+        "gcp_instance.get_adc_account_email",
+        side_effect=[
+            ("other@example.com", ""),
+            ("", "tokeninfo timeout"),
+        ],
+    )
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_gcloud_account_requires_verified_adc_after_sync(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        _mock_adc_account,
+        _mock_clear_caches,
+        _mock_current_account,
+    ):
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "无法确认账号"):
+            switch_gcloud_account("demo@example.com", sync_adc=True)
+
+    @patch("gcp_instance.projects_client")
+    @patch("gcp_instance.prompt_manual_project_id", return_value="manual-project")
+    @patch("gcp_instance.get_current_adc_account", return_value="")
+    @patch("gcp_instance.list_active_projects_via_gcloud", side_effect=RuntimeError("gcloud failed"))
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_select_gcp_project_skips_resource_manager_when_selected_account_adc_unknown(
+        self,
+        _mock_find_gcloud,
+        _mock_list_projects,
+        _mock_adc_account,
+        mock_manual_project,
+        mock_projects_client,
+    ):
+        project_id = select_gcp_project(account="demo@example.com")
+
+        self.assertEqual(project_id, "manual-project")
+        mock_manual_project.assert_called_once_with(allow_back=False)
+        mock_projects_client.assert_not_called()
 
     def test_record_reroll_exception_tracks_soft_and_hard_counters(self):
         stats = RerollStats(
