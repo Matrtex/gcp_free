@@ -113,10 +113,13 @@ def is_transient_gcp_error(exc: Any) -> Any:
     return any(marker in message for marker in transient_markers)
 
 def is_operation_in_progress_error(exc: Any) -> Any:
+    message = str(exc).lower()
+    if "already exists" in message:
+        return False
+
     if google_exceptions and isinstance(exc, google_exceptions.Conflict):
         return True
 
-    message = str(exc).lower()
     conflict_markers = [
         " 409 ",
         "already in progress",

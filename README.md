@@ -192,6 +192,17 @@ python scripts/build_exe.py --clean --version v1.0.0
 .\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> --dry-run apt
 ```
 
+防火墙规则：
+
+```powershell
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --allow-all-ingress
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --deny-cdn-egress
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --delete-deny-cdn-egress
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --delete-managed-rules
+```
+
+重复添加已存在的防火墙规则会视为成功并跳过；`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。
+
 一键部署流程：
 
 ```powershell

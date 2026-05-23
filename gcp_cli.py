@@ -280,6 +280,8 @@ def handle_firewall_cli(args: Namespace) -> None:
         allow_all_ingress=args.allow_all_ingress,
         deny_cdn_egress=args.deny_cdn_egress,
         cdnip_filename=args.cdnip_file,
+        delete_deny_cdn=args.delete_deny_cdn_egress,
+        delete_managed_rules=args.delete_managed_rules,
     )
 
 def handle_run_script_cli(args: Namespace) -> None:
@@ -590,6 +592,16 @@ def build_arg_parser() -> Any:
         "--deny-cdn-egress",
         action="store_true",
         help="添加拒绝 cdnip.txt 中 IP 的出站规则",
+    )
+    firewall_parser.add_argument(
+        "--delete-deny-cdn-egress",
+        action="store_true",
+        help="删除拒绝 CDN 出站规则，允许 CDN IP 访问",
+    )
+    firewall_parser.add_argument(
+        "--delete-managed-rules",
+        action="store_true",
+        help="删除本工具添加的全部防火墙规则",
     )
     firewall_parser.add_argument("--cdnip-file", default="cdnip.txt", help="CDN IP 列表文件路径")
     firewall_parser.set_defaults(handler=ACTION_SPEC_MAP["firewall"].cli_handler)

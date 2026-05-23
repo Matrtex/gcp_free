@@ -2,13 +2,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import call, patch
 import subprocess
 
 from gcp import (
     classify_reroll_exception,
     clear_adc_account_cache,
     configure_firewall_non_interactive,
+    add_allow_all_ingress,
+    delete_managed_firewall_rules,
     find_instance_by_name,
     ensure_instance_running,
     get_current_adc_account,
@@ -23,6 +25,8 @@ from gcp import (
     handle_reroll_ip_amd_cli,
     handle_reroll_ip_cli,
     is_transient_gcp_error,
+    is_already_exists_error,
+    is_operation_in_progress_error,
     is_reroll_state_compatible,
     is_ip_target_met,
     is_target_cpu,
@@ -86,6 +90,77 @@ class GcpHelpersTestCase(unittest.TestCase):
                 "global/networks/default",
                 allow_all_ingress=True,
             )
+
+    def test_is_already_exists_error_checks_wrapped_cause(self):
+        try:
+            try:
+                raise RuntimeError(
+                    "409 POST https://compute.googleapis.com/compute/v1/projects/demo/global/firewalls: "
+                    "The resource 'projects/demo/global/firewalls/allow-all-ingress-custom' already exists"
+                )
+            except RuntimeError as exc:
+                raise RuntimeError("创建防火墙规则 allow-all-ingress-custom 在 4 次尝试后仍失败") from exc
+        except RuntimeError as wrapped_exc:
+            self.assertTrue(is_already_exists_error(wrapped_exc, "allow-all-ingress-custom"))
+            self.assertFalse(is_already_exists_error(wrapped_exc, "deny-cdn-egress-custom"))
+
+    def test_operation_conflict_does_not_retry_already_exists(self):
+        self.assertFalse(
+            is_operation_in_progress_error(
+                RuntimeError("409 POST https://compute.googleapis.com/compute/v1/projects/demo: already exists")
+            )
+        )
+        self.assertTrue(
+            is_operation_in_progress_error(
+                RuntimeError("409 POST https://compute.googleapis.com/compute/v1/projects/demo: operation is already in progress")
+            )
+        )
+
+    @patch("gcp_firewall.print_success")
+    @patch("gcp_firewall.wait_for_global_operation")
+    @patch("gcp_firewall.firewall_rule_exists", return_value=False)
+    @patch("gcp_firewall.insert_firewall_with_retry")
+    def test_add_allow_all_ingress_treats_existing_rule_as_success(
+        self,
+        mock_insert_firewall,
+        _mock_rule_exists,
+        mock_wait_operation,
+        _mock_print_success,
+    ):
+        def raise_wrapped_existing(*_args, **_kwargs):
+            try:
+                raise RuntimeError(
+                    "The resource 'projects/demo/global/firewalls/allow-all-ingress-custom' already exists"
+                )
+            except RuntimeError as exc:
+                raise RuntimeError("创建防火墙规则 allow-all-ingress-custom 在 4 次尝试后仍失败") from exc
+
+        mock_insert_firewall.side_effect = raise_wrapped_existing
+
+        self.assertTrue(add_allow_all_ingress("demo-project", "global/networks/default"))
+        mock_wait_operation.assert_not_called()
+
+    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
+    def test_configure_firewall_non_interactive_deletes_deny_cdn_rule(self, mock_delete_deny):
+        configure_firewall_non_interactive(
+            "demo-project",
+            "global/networks/default",
+            delete_deny_cdn=True,
+        )
+
+        mock_delete_deny.assert_called_once_with("demo-project")
+
+    @patch("gcp_firewall.delete_firewall_rule", return_value=True)
+    def test_delete_managed_firewall_rules_deletes_known_rules(self, mock_delete_rule):
+        self.assertTrue(delete_managed_firewall_rules("demo-project"))
+
+        self.assertEqual(
+            mock_delete_rule.call_args_list,
+            [
+                call("demo-project", "allow-all-ingress-custom"),
+                call("demo-project", "deny-cdn-egress-custom"),
+            ],
+        )
 
     def test_instance_cache_key_uses_project_zone_and_name(self):
         instance = InstanceInfo(
@@ -457,6 +532,32 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(ip_args.account, "demo@example.com")
         self.assertTrue(ip_args.auth_no_browser)
         self.assertIs(ip_amd_args.handler, handle_reroll_ip_amd_cli)
+
+    def test_firewall_cli_delete_commands_parse(self):
+        deny_args = parse_args([
+            "firewall",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--delete-deny-cdn-egress",
+        ])
+        managed_args = parse_args([
+            "firewall",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--delete-managed-rules",
+        ])
+
+        self.assertTrue(deny_args.delete_deny_cdn_egress)
+        self.assertFalse(deny_args.delete_managed_rules)
+        self.assertTrue(managed_args.delete_managed_rules)
 
     def test_switch_account_cli_command_parses(self):
         args = parse_args([
