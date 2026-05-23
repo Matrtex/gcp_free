@@ -10,6 +10,7 @@ from gcp import (
     configure_firewall_non_interactive,
     find_instance_by_name,
     ensure_instance_running,
+    get_current_adc_account,
     get_instance_cache_key,
     get_oauth_circuit_breaker_cooldown,
     get_instance_with_retry,
@@ -27,11 +28,13 @@ from gcp import (
     list_instances_via_gcloud,
     load_reroll_stats_from_file,
     login_gcloud_account,
+    list_active_projects_via_gcloud,
     list_gcloud_accounts_via_gcloud,
     parse_args,
     record_reroll_exception,
     read_cdn_ips,
     resolve_os_config,
+    select_startup_gcloud_account,
     switch_gcloud_account,
     sleep_and_detect_pause,
     summarize_text_block,
@@ -171,14 +174,25 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertTrue(accounts[0]["active"])
         self.assertFalse(accounts[1]["active"])
 
+    @patch("gcp_instance.get_current_gcloud_account", return_value="old@example.com")
     @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch(
+        "gcp_instance.get_adc_account_email",
+        side_effect=[
+            ("other@example.com", ""),
+            ("demo@example.com", ""),
+            ("demo@example.com", ""),
+        ],
+    )
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
     @patch("gcp_instance.subprocess.run")
     def test_switch_gcloud_account_syncs_adc_and_clears_client_cache(
         self,
         mock_run,
         _mock_find_gcloud,
+        _mock_adc_account,
         mock_clear_caches,
+        _mock_current_account,
     ):
         mock_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr=""),
@@ -193,11 +207,42 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(first_cmd, ["gcloud", "config", "set", "account", "demo@example.com"])
         self.assertEqual(
             second_cmd,
-            ["gcloud", "auth", "application-default", "login", "demo@example.com", "--no-browser"],
+            [
+                "gcloud",
+                "--account=demo@example.com",
+                "auth",
+                "application-default",
+                "login",
+                "demo@example.com",
+                "--disable-quota-project",
+                "--no-browser",
+            ],
         )
         self.assertEqual(mock_clear_caches.call_count, 2)
 
+    @patch("gcp_instance.get_current_gcloud_account", return_value=None)
+    @patch("gcp_instance.get_adc_account_email", return_value=("demo@example.com", ""))
+    @patch("gcp_instance.clear_google_cloud_client_caches")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_gcloud_account_handles_missing_active_account(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        _mock_clear_caches,
+        _mock_adc_account,
+        _mock_current_account,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        switched_account = switch_gcloud_account("demo@example.com", sync_adc=False)
+
+        self.assertEqual(switched_account, "demo@example.com")
+        first_cmd = mock_run.call_args_list[0].args[0]
+        self.assertEqual(first_cmd, ["gcloud", "config", "set", "account", "demo@example.com"])
+
     @patch("gcp_instance.get_current_gcloud_account", return_value="new@example.com")
+    @patch("gcp_instance.get_adc_account_email", return_value=("new@example.com", ""))
     @patch("gcp_instance.clear_google_cloud_client_caches")
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
     @patch("gcp_instance.subprocess.run")
@@ -206,6 +251,7 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_run,
         _mock_find_gcloud,
         mock_clear_caches,
+        _mock_adc_account,
         _mock_current_account,
     ):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
@@ -219,6 +265,43 @@ class GcpHelpersTestCase(unittest.TestCase):
             ["gcloud", "auth", "login", "new@example.com", "--no-browser", "--update-adc"],
         )
         mock_clear_caches.assert_called_once()
+
+    @patch("gcp_instance.switch_gcloud_account", return_value="second@example.com")
+    @patch("gcp_instance.select_gcloud_account", return_value="second@example.com")
+    @patch(
+        "gcp_instance.list_gcloud_accounts_via_gcloud",
+        return_value=[
+            {"account": "first@example.com", "status": "ACTIVE", "active": True},
+            {"account": "second@example.com", "status": "UNKNOWN", "active": False},
+        ],
+    )
+    def test_select_startup_gcloud_account_prompts_when_multiple_accounts(
+        self,
+        _mock_accounts,
+        mock_select_account,
+        mock_switch_account,
+    ):
+        selected = select_startup_gcloud_account()
+
+        self.assertEqual(selected, "second@example.com")
+        mock_select_account.assert_called_once()
+        mock_switch_account.assert_called_once_with("second@example.com", sync_adc=False)
+
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_list_active_projects_via_gcloud_uses_selected_account(self, mock_run, _mock_find_gcloud):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='[{"projectId":"demo-project","name":"Demo","lifecycleState":"ACTIVE"}]',
+            stderr="",
+        )
+
+        projects = list_active_projects_via_gcloud(account="demo@example.com")
+
+        self.assertEqual(projects[0]["project_id"], "demo-project")
+        command = mock_run.call_args.args[0]
+        self.assertIn("--account=demo@example.com", command)
 
     def test_is_target_cpu_accepts_amd_and_epyc(self):
         self.assertTrue(is_target_cpu("AMD EPYC Milan"))
@@ -236,6 +319,9 @@ class GcpHelpersTestCase(unittest.TestCase):
             "reroll-ip",
             "--project-id",
             "demo-project",
+            "--account",
+            "demo@example.com",
+            "--auth-no-browser",
             "--instance",
             "vm-1",
             "--zone",
@@ -254,6 +340,8 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertIs(ip_args.handler, handle_reroll_ip_cli)
         self.assertTrue(ip_args.resume)
+        self.assertEqual(ip_args.account, "demo@example.com")
+        self.assertTrue(ip_args.auth_no_browser)
         self.assertIs(ip_amd_args.handler, handle_reroll_ip_amd_cli)
 
     def test_switch_account_cli_command_parses(self):
@@ -290,12 +378,22 @@ class GcpHelpersTestCase(unittest.TestCase):
             "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
             "HTTPSConnectionPool(host='compute.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
         )
+        permission_exc = RuntimeError(
+            "403 GET https://compute.googleapis.com/compute/v1/projects/demo/zones/us-west1-b/instances/vm-1: "
+            "Required 'compute.instances.get' permission for 'projects/demo/zones/us-west1-b/instances/vm-1'"
+        )
         hard_exc = RuntimeError("permission denied")
 
         self.assertEqual(classify_reroll_exception(oauth_exc), "oauth_timeout")
         self.assertEqual(classify_reroll_exception(stop_exc), "instance_stuck")
         self.assertEqual(classify_reroll_exception(compute_exc), "compute_timeout")
-        self.assertEqual(classify_reroll_exception(hard_exc), "hard_failure")
+        self.assertEqual(classify_reroll_exception(permission_exc), "permission_denied")
+        self.assertEqual(classify_reroll_exception(hard_exc), "permission_denied")
+
+    @patch("gcp_instance.get_adc_account_email", return_value=("adc@example.com", ""))
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    def test_get_current_adc_account_reads_adc_identity(self, _mock_find_gcloud, _mock_adc_email):
+        self.assertEqual(get_current_adc_account(), "adc@example.com")
 
     def test_record_reroll_exception_tracks_soft_and_hard_counters(self):
         stats = RerollStats(
@@ -319,7 +417,7 @@ class GcpHelpersTestCase(unittest.TestCase):
                 "HTTPSConnectionPool(host='compute.googleapis.com', port=443): Read timed out. (read timeout=10.0)"
             ),
         )
-        hard_kind, _ = record_reroll_exception(stats, RuntimeError("permission denied"))
+        hard_kind, _ = record_reroll_exception(stats, RuntimeError("unexpected local failure"))
 
         self.assertEqual(oauth_kind, "oauth_timeout")
         self.assertEqual(compute_kind, "compute_timeout")

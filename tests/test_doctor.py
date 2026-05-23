@@ -17,6 +17,7 @@ class DoctorTestCase(unittest.TestCase):
         "gcp_doctor.get_enabled_gcp_services",
         return_value=({"compute.googleapis.com", "cloudresourcemanager.googleapis.com"}, []),
     )
+    @patch("gcp_doctor.get_adc_account_email_from_token", return_value=("demo@example.com", ""))
     @patch("gcp_doctor.get_current_gcloud_project", return_value=("demo-project", ""))
     @patch("gcp_doctor.find_python_command", return_value="/mock/python")
     @patch("gcp_doctor.find_gcloud_command", return_value="/mock/gcloud")
@@ -27,6 +28,7 @@ class DoctorTestCase(unittest.TestCase):
         _mock_find_gcloud,
         _mock_find_python,
         _mock_current_project,
+        _mock_adc_account,
         _mock_services,
         _mock_workspace_checks,
         mock_which,
@@ -48,8 +50,48 @@ class DoctorTestCase(unittest.TestCase):
         self.assertEqual(status_map["python"], "PASS")
         self.assertEqual(status_map["gcloud-auth"], "PASS")
         self.assertEqual(status_map["adc"], "PASS")
+        self.assertEqual(status_map["adc-account"], "PASS")
         self.assertEqual(status_map["requirements"], "PASS")
         self.assertIn("demo@example.com", message_map["gcloud-auth"])
+
+    @patch("gcp_doctor.shutil.which")
+    @patch("gcp_doctor.collect_workspace_checks", return_value=[])
+    @patch(
+        "gcp_doctor.get_enabled_gcp_services",
+        return_value=({"compute.googleapis.com", "cloudresourcemanager.googleapis.com"}, []),
+    )
+    @patch("gcp_doctor.get_adc_account_email_from_token", return_value=("adc@example.com", ""))
+    @patch("gcp_doctor.get_current_gcloud_project", return_value=("demo-project", ""))
+    @patch("gcp_doctor.find_python_command", return_value="/mock/python")
+    @patch("gcp_doctor.find_gcloud_command", return_value="/mock/gcloud")
+    @patch("gcp_doctor.subprocess.run")
+    def test_doctor_warns_when_adc_account_differs_from_gcloud_account(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        _mock_find_python,
+        _mock_current_project,
+        _mock_adc_account,
+        _mock_services,
+        _mock_workspace_checks,
+        mock_which,
+    ):
+        mock_which.side_effect = lambda name: f"/mock/{name}" if name in {"ssh", "scp"} else None
+        mock_run.side_effect = [
+            self._completed(stdout="gcloud@example.com"),
+            self._completed(stdout="token"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            requirements = Path(tmp_dir, "requirements.txt")
+            requirements.write_text("google-cloud-compute\n", encoding="utf-8")
+            checks = run_doctor(requirements, project_id="demo-project")
+
+        status_map = {item.name: item.status for item in checks}
+        message_map = {item.name: item.message for item in checks}
+        self.assertEqual(status_map["adc-account"], "WARN")
+        self.assertIn("adc@example.com", message_map["adc-account"])
+        self.assertIn("gcloud@example.com", message_map["adc-account"])
 
     @patch("gcp_doctor.shutil.which")
     @patch("gcp_doctor.collect_workspace_checks", return_value=[])

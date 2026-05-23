@@ -107,7 +107,7 @@ from gcp_config import (
     get_runtime_root,
     resolve_asset_path,
 )
-from gcp_doctor import find_gcloud_command, run_doctor
+from gcp_doctor import find_gcloud_command, get_adc_account_email, run_doctor
 from gcp_ips import update_cdnip_file
 from gcp_logging import configure_logger, get_logger
 from gcp_models import ActionSpec, DoctorCheck, InstanceInfo, RemoteConfig, RerollStats, RuntimeContext

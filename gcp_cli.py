@@ -26,6 +26,7 @@ from gcp_instance import (
     get_current_gcloud_account,
     login_gcloud_account,
     list_instances,
+    prepare_gcloud_context,
     print_instance_list,
     switch_gcloud_account,
 )
@@ -71,6 +72,7 @@ from gcp_utils import (
 
 __all__ = [
     'build_remote_config_from_args',
+    'prepare_cli_account_context',
     'get_cli_instance',
     'prepare_cli_remote_instance',
     'handle_create_cli',
@@ -145,6 +147,21 @@ def build_remote_config_from_args(args: Any) -> Any:
         )
 
     raise ValueError("当前环境既没有 gcloud，也没有 ssh，无法执行远程操作。")
+
+def prepare_cli_account_context(args: Any) -> Any:
+    project_id = getattr(args, "project_id", None)
+    account = getattr(args, "account", None)
+    if getattr(args, "dry_run", False):
+        return None
+    if not project_id and not account:
+        return None
+
+    return prepare_gcloud_context(
+        project_id=project_id,
+        account=account,
+        sync_adc=bool(account),
+        no_browser=bool(getattr(args, "auth_no_browser", False)),
+    )
 
 def get_cli_instance(args: Any) -> Any:
     if getattr(args, "dry_run", False) and getattr(args, "instance", None) and getattr(args, "zone", None):
@@ -402,9 +419,21 @@ def build_arg_parser() -> Any:
 
     project_parent = argparse.ArgumentParser(add_help=False)
     project_parent.add_argument("--project-id", required=True, help="GCP 项目 ID")
+    project_parent.add_argument("--account", help="执行命令前切换到指定 gcloud 账号，并同步 ADC")
+    project_parent.add_argument(
+        "--auth-no-browser",
+        action="store_true",
+        help="同步 ADC 时使用无浏览器模式，仅与 --account 一起生效",
+    )
 
     instance_parent = argparse.ArgumentParser(add_help=False)
     instance_parent.add_argument("--project-id", required=True, help="GCP 项目 ID")
+    instance_parent.add_argument("--account", help="执行命令前切换到指定 gcloud 账号，并同步 ADC")
+    instance_parent.add_argument(
+        "--auth-no-browser",
+        action="store_true",
+        help="同步 ADC 时使用无浏览器模式，仅与 --account 一起生效",
+    )
     instance_parent.add_argument("--instance", required=True, help="实例名称")
     instance_parent.add_argument("--zone", help="实例所在可用区；存在同名实例时建议显式指定")
 
@@ -645,6 +674,8 @@ def run_cli(args: Any) -> Any:
         handle_login_account_cli,
         handle_switch_account_cli,
     }
+    if handler not in no_library_handlers:
+        prepare_cli_account_context(args)
     if handler not in no_library_handlers and not getattr(args, "dry_run", False):
         ensure_libraries_or_exit()
     handler(args)

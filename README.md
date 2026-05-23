@@ -56,15 +56,15 @@ gcloud auth application-default login
 如果你想直接使用非交互 CLI，也可以这样执行：
 
 ```powershell
-.\start.ps1 list-instances --project-id <你的项目ID>
+.\start.ps1 list-instances --project-id <你的项目ID> --account <你的Google账号邮箱>
 .\start.ps1 login-account --account <你的Google账号邮箱>
 .\start.ps1 switch-account --account <你的Google账号邮箱>
-.\start.ps1 reroll-ip --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
-.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
-.\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> apt
+.\start.ps1 reroll-ip --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 run-script --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> apt
 .\start.ps1 doctor --project-id <你的项目ID>
-.\start.ps1 setup --project-id <你的项目ID> --skip-reroll
-.\start.ps1 status --project-id <你的项目ID> --instance <实例名> --zone <可用区>
+.\start.ps1 setup --project-id <你的项目ID> --account <你的Google账号邮箱> --skip-reroll
+.\start.ps1 status --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
 ```
 
 ### Linux / WSL / Git Bash 运行脚本
@@ -126,6 +126,15 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## 常用命令
 
+如果本机登录了多个 gcloud 账号，直接运行 `.\start.ps1` 时会先让你选择账号，再扫描该账号可访问的项目。选择项目后脚本会同步：
+
+- `gcloud` 活跃账号
+- `Application Default Credentials`
+- `gcloud` 默认项目
+- ADC quota project
+
+非交互 CLI 命令建议显式加 `--account <你的Google账号邮箱>`，避免使用旧的账号或 ADC 状态。
+
 环境预检：
 
 ```powershell
@@ -160,19 +169,19 @@ python scripts/build_exe.py --clean --version v1.0.0
 从状态文件恢复刷 CPU：
 
 ```powershell
-.\start.ps1 reroll-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 reroll-amd --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
 ```
 
 刷外网 IP：
 
 ```powershell
-.\start.ps1 reroll-ip --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 reroll-ip --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
 ```
 
 同时刷外网 IP 和 AMD/EPYC CPU：
 
 ```powershell
-.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --instance <实例名> --zone <可用区> --resume
+.\start.ps1 reroll-ip-amd --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
 ```
 
 `reroll-ip` 会以启动前读取到的外网 IP 为基准，停启实例直到外网 IP 变化；如果一开始没有外网 IP，则获取到任意有效外网 IP 即视为成功。`reroll-ip-amd` 需要同一轮同时满足外网 IP 变化和 CPU 命中 AMD/EPYC。

@@ -1,7 +1,10 @@
 import os
+import json
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -77,6 +80,37 @@ def get_current_gcloud_project(gcloud_path: str) -> Tuple[str, str]:
     if ok and project_id and project_id != "(unset)":
         return project_id, ""
     return "", stderr or "未设置默认项目"
+
+
+def get_adc_account_email_from_token(access_token: str, timeout: int = 10) -> Tuple[str, str]:
+    token = (access_token or "").strip()
+    if not token:
+        return "", "ADC token 为空"
+
+    query = urllib.parse.urlencode({"access_token": token})
+    try:
+        with urllib.request.urlopen(
+            f"https://oauth2.googleapis.com/tokeninfo?{query}",
+            timeout=timeout,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return "", f"无法识别 ADC 账号: {exc}"
+
+    email = str(payload.get("email") or "").strip()
+    if email:
+        return email, ""
+    return "", "tokeninfo 未返回 ADC 账号邮箱"
+
+
+def get_adc_account_email(gcloud_path: str, timeout: int = 10) -> Tuple[str, str]:
+    ok, stdout, stderr = _run_command(
+        [gcloud_path, "auth", "application-default", "print-access-token"],
+        timeout=timeout,
+    )
+    if not ok or not stdout:
+        return "", stderr or "ADC 未配置"
+    return get_adc_account_email_from_token(stdout, timeout=timeout)
 
 
 def is_directory_writable(path: Path | str) -> Tuple[bool, str]:
@@ -172,6 +206,19 @@ def run_doctor(requirements_file: str | Path, project_id: Optional[str] = None) 
         ok, stdout, stderr = _run_command([gcloud_path, "auth", "application-default", "print-access-token"])
         if ok and stdout:
             checks.append(DoctorCheck("adc", "PASS", "Application Default Credentials 可用"))
+            adc_account, adc_account_error = get_adc_account_email_from_token(stdout)
+            if adc_account and account and adc_account.lower() != account.lower():
+                checks.append(
+                    DoctorCheck(
+                        "adc-account",
+                        "WARN",
+                        f"ADC 账号为 {adc_account}，与当前 gcloud 账号 {account} 不一致；Python API 会使用 ADC，可能导致 403。请运行 gcloud auth application-default login {account}",
+                    )
+                )
+            elif adc_account:
+                checks.append(DoctorCheck("adc-account", "PASS", f"ADC 账号: {adc_account}"))
+            elif adc_account_error:
+                checks.append(DoctorCheck("adc-account", "WARN", adc_account_error))
         else:
             checks.append(DoctorCheck("adc", "WARN", stderr or "ADC 未配置"))
 

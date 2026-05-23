@@ -56,6 +56,7 @@ __all__ = [
     'get_legacy_exception_count',
     'format_exception_breakdown',
     'is_oauth_timeout_error',
+    'is_permission_denied_error',
     'is_compute_timeout_error',
     'is_instance_stuck_error',
     'classify_reroll_exception',
@@ -243,9 +244,41 @@ def format_exception_breakdown(stats: Any) -> Any:
 def is_oauth_timeout_error(exc: Any) -> Any:
     return "oauth2.googleapis.com" in str(exc).lower()
 
+def is_permission_denied_error(exc: Any) -> Any:
+    message = str(exc).lower()
+    permission_markers = [
+        " 403 ",
+        "403 get ",
+        "403 post ",
+        "permission denied",
+        "required 'compute.",
+        "does not have permission",
+        "the caller does not have permission",
+        "forbidden",
+        "insufficient permission",
+        "insufficient authentication scopes",
+    ]
+    return any(marker in message for marker in permission_markers)
+
 def is_compute_timeout_error(exc: Any) -> Any:
     message = str(exc).lower()
-    return "compute.googleapis.com" in message or "/compute/v1/" in message
+    if "compute.googleapis.com" not in message and "/compute/v1/" not in message:
+        return False
+    transient_markers = [
+        " 429 ",
+        " 502 ",
+        " 503 ",
+        " 504 ",
+        "httpsconnectionpool",
+        "max retries exceeded",
+        "read timed out",
+        "connect timeout",
+        "connection reset",
+        "connection aborted",
+        "remote end closed connection",
+        "temporarily unavailable",
+    ]
+    return any(marker in message for marker in transient_markers)
 
 def is_instance_stuck_error(exc: Any) -> Any:
     message = str(exc)
@@ -255,6 +288,8 @@ def is_instance_stuck_error(exc: Any) -> Any:
     )
 
 def classify_reroll_exception(exc: Any) -> Any:
+    if is_permission_denied_error(exc):
+        return "permission_denied"
     if is_oauth_timeout_error(exc):
         return "oauth_timeout"
     if is_instance_stuck_error(exc):
@@ -268,6 +303,7 @@ def format_exception_kind_label(exception_kind: Any) -> Any:
         "oauth_timeout": "OAuth 超时",
         "compute_timeout": "Compute 超时",
         "instance_stuck": "实例卡住",
+        "permission_denied": "权限错误",
         "hard_failure": "硬异常",
     }.get(exception_kind, "未知异常")
 
@@ -497,11 +533,22 @@ def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="
                 exception_kind, summarized_error = record_reroll_exception(stats, e)
                 stats.last_updated = time.time()
                 save_json_state(state_path, stats.to_dict())
-                print_warning(
-                    f"本轮尝试遇到{format_exception_kind_label(exception_kind)}，将自动恢复后继续: "
-                    f"{summarized_error}"
-                )
+                if exception_kind == "permission_denied":
+                    print_warning(
+                        f"本轮尝试遇到{format_exception_kind_label(exception_kind)}，已停止自动重试: "
+                        f"{summarized_error}"
+                    )
+                else:
+                    print_warning(
+                        f"本轮尝试遇到{format_exception_kind_label(exception_kind)}，将自动恢复后继续: "
+                        f"{summarized_error}"
+                    )
                 print_reroll_progress(stats, state_path)
+                if exception_kind == "permission_denied":
+                    raise RuntimeError(
+                        "检测到 GCP 权限错误，已停止自动重试。请确认当前 gcloud 账号与 ADC 账号一致，"
+                        "并且该账号拥有目标项目的 compute.instances.get/start/stop 权限。"
+                    ) from e
 
             attempt_counter += 1
             cooldown_base, cooldown_reason = get_reroll_cooldown_policy(

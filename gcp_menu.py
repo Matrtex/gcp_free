@@ -14,12 +14,15 @@ from gcp_instance import (
     get_current_gcloud_account,
     get_instance_cache_key,
     login_gcloud_account,
+    prepare_gcloud_context,
     select_gcp_project,
     select_gcloud_account,
+    select_startup_gcloud_account,
     select_instance,
     select_os_image,
     select_zone,
     switch_gcloud_account,
+    warn_if_adc_account_mismatch,
 )
 from gcp_remote import (
     deploy_dae_config,
@@ -171,6 +174,7 @@ def run_menu_reroll_mode(
 ) -> Any:
     current_instance = ensure_context_instance(context)
     if current_instance:
+        warn_if_adc_account_mismatch(context.current_account)
         existing_stats = load_reroll_stats_from_file(state_path)
         resume = bool(
             existing_stats
@@ -310,10 +314,12 @@ def main() -> Any:
     ensure_libraries_or_exit()
     print("GCP 免费服务器多功能管理工具")
     sys.stdout.flush()
-    current_account = get_current_gcloud_account() or None
+    current_account = select_startup_gcloud_account() or get_current_gcloud_account() or None
     if current_account:
         print_info(f"当前 gcloud 账号: {current_account}")
-    project_id = select_gcp_project()
+    project_id = select_gcp_project(account=current_account)
+    if current_account and project_id:
+        prepare_gcloud_context(project_id=project_id, account=current_account, sync_adc=True)
     context = RuntimeContext(project_id=project_id, current_account=current_account)
 
     while True:

@@ -17,6 +17,7 @@ from gcp_common import (
     clear_google_cloud_client_caches,
     compute_v1,
     find_gcloud_command,
+    get_adc_account_email,
     images_client,
     instances_client,
     json,
@@ -58,6 +59,14 @@ from gcp_utils import (
 __all__ = [
     'list_gcloud_accounts_via_gcloud',
     'get_current_gcloud_account',
+    'get_current_adc_account',
+    'warn_if_adc_account_mismatch',
+    'sync_adc_account',
+    'set_gcloud_project',
+    'set_adc_quota_project',
+    'apply_selected_project',
+    'prepare_gcloud_context',
+    'select_startup_gcloud_account',
     'select_gcloud_account',
     'login_gcloud_account',
     'switch_gcloud_account',
@@ -133,6 +142,182 @@ def get_current_gcloud_account() -> Any:
             return item["account"]
     return ""
 
+def get_current_adc_account() -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return ""
+    adc_account, _error = get_adc_account_email(gcloud_command)
+    return adc_account
+
+def warn_if_adc_account_mismatch(current_account: Any=None) -> Any:
+    gcloud_account = str(current_account or get_current_gcloud_account() or "").strip()
+    adc_account = str(get_current_adc_account() or "").strip()
+    if not gcloud_account or not adc_account:
+        return True
+    if gcloud_account.lower() == adc_account.lower():
+        return True
+
+    print_warning(
+        f"当前 gcloud 账号是 {gcloud_account}，但 Application Default Credentials 账号是 {adc_account}。"
+        "Python API 会使用 ADC 账号，可能导致 Compute API 403 权限错误。"
+    )
+    print_warning(f"请运行: gcloud auth application-default login {gcloud_account}")
+    return False
+
+def sync_adc_account(account: Any, no_browser: Any = False, quota_project: Any = None) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        raise RuntimeError("当前环境未找到 gcloud，无法同步 ADC。")
+
+    target_account = str(account or "").strip()
+    if not target_account:
+        raise ValueError("同步 ADC 时目标账号不能为空。")
+
+    current_adc_account = str(get_current_adc_account() or "").strip()
+    if current_adc_account.lower() == target_account.lower():
+        print_info(f"ADC 已匹配当前账号: {target_account}")
+        return target_account
+
+    adc_cmd = [
+        gcloud_command,
+        f"--account={target_account}",
+        "auth",
+        "application-default",
+        "login",
+        target_account,
+    ]
+    target_quota_project = str(quota_project or "").strip()
+    if target_quota_project:
+        adc_cmd.append(f"--project={target_quota_project}")
+    else:
+        adc_cmd.append("--disable-quota-project")
+    if no_browser:
+        adc_cmd.append("--no-browser")
+    print_info("正在同步 Application Default Credentials。")
+    print_info("此步骤可能打开浏览器，或要求您按 gcloud 提示完成授权。")
+    result = subprocess.run(adc_cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "同步 ADC 失败。请重新执行切换账号，或手动运行 "
+            f"gcloud auth application-default login {target_account}。"
+        )
+    clear_google_cloud_client_caches()
+
+    verified_account = str(get_current_adc_account() or "").strip()
+    if verified_account and verified_account.lower() != target_account.lower():
+        raise RuntimeError(
+            f"ADC 同步后仍为 {verified_account}，不是目标账号 {target_account}。"
+            "请检查浏览器授权时选择的账号。"
+        )
+    return target_account
+
+def set_gcloud_project(project_id: Any) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return False
+    target_project = str(project_id or "").strip()
+    if not target_project:
+        return False
+
+    result = subprocess.run(
+        [gcloud_command, "config", "set", "project", target_project],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        raise RuntimeError(f"设置 gcloud 默认项目失败: {stderr_summary}")
+    print_info(f"已设置 gcloud 默认项目: {target_project}")
+    return True
+
+def set_adc_quota_project(project_id: Any) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return False
+    target_project = str(project_id or "").strip()
+    if not target_project:
+        return False
+
+    result = subprocess.run(
+        [gcloud_command, "auth", "application-default", "set-quota-project", target_project],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        print_warning(f"设置 ADC quota project 失败，后续 API 仍会继续尝试: {stderr_summary}")
+        return False
+    print_info(f"已设置 ADC quota project: {target_project}")
+    return True
+
+def apply_selected_project(project_id: Any, account: Any = None) -> Any:
+    target_project = str(project_id or "").strip()
+    if not target_project:
+        return False
+
+    set_gcloud_project(target_project)
+    target_account = str(account or "").strip()
+    adc_account = str(get_current_adc_account() or "").strip()
+    if adc_account and (not target_account or adc_account.lower() == target_account.lower()):
+        set_adc_quota_project(target_project)
+    elif adc_account and target_account:
+        print_info("已暂缓设置 ADC quota project；同步 ADC 后会使用当前选择的项目。")
+    return True
+
+def prepare_gcloud_context(
+    project_id: Any = None,
+    account: Any = None,
+    sync_adc: Any = True,
+    no_browser: Any = False,
+    set_quota_project: Any = True,
+) -> Any:
+    target_account = str(account or "").strip()
+    if target_account:
+        switched_account = switch_gcloud_account(
+            target_account,
+            sync_adc=sync_adc,
+            no_browser=no_browser,
+            project_id=project_id,
+            set_quota_project=set_quota_project,
+        )
+    else:
+        switched_account = get_current_gcloud_account()
+        if switched_account:
+            print_info(f"使用当前 gcloud 账号: {switched_account}")
+        warn_if_adc_account_mismatch(switched_account)
+        if project_id:
+            set_gcloud_project(project_id)
+            if set_quota_project and get_current_adc_account():
+                set_adc_quota_project(project_id)
+    return switched_account
+
+def select_startup_gcloud_account() -> Any:
+    try:
+        accounts = list_gcloud_accounts_via_gcloud()
+    except Exception as exc:
+        print_warning(f"读取 gcloud 账号列表失败: {summarize_exception(exc)}")
+        return get_current_gcloud_account() or None
+
+    if not accounts:
+        print_warning("当前没有已登录的 gcloud 账号，请先使用“登录新账号”功能或运行 gcloud auth login。")
+        return None
+
+    selected_account = None
+    if len(accounts) == 1:
+        selected_account = accounts[0]["account"]
+        print_info(f"检测到唯一 gcloud 账号: {selected_account}")
+    else:
+        selected_account = select_gcloud_account()
+
+    if not selected_account:
+        return None
+
+    return switch_gcloud_account(selected_account, sync_adc=False)
+
 def select_gcloud_account(allow_back: bool = False) -> Any:
     print_info("正在读取本机 gcloud 登录账号...")
     accounts = list_gcloud_accounts_via_gcloud()
@@ -173,8 +358,9 @@ def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
         )
 
     clear_google_cloud_client_caches()
-    current_account = get_current_gcloud_account()
+    current_account = str(get_current_gcloud_account() or "").strip()
     if current_account:
+        warn_if_adc_account_mismatch(current_account)
         print_success(f"已登录并切换到账号: {current_account}")
         return current_account
     if target_account:
@@ -182,7 +368,13 @@ def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
         return target_account
     raise RuntimeError("登录流程已结束，但未能识别当前活跃账号。")
 
-def switch_gcloud_account(account: Any,  sync_adc: Any=True,  no_browser: Any=False) -> Any:
+def switch_gcloud_account(
+    account: Any,
+    sync_adc: Any = True,
+    no_browser: Any = False,
+    project_id: Any = None,
+    set_quota_project: Any = True,
+) -> Any:
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
         raise RuntimeError("当前环境未找到 gcloud，无法切换账号。")
@@ -191,51 +383,58 @@ def switch_gcloud_account(account: Any,  sync_adc: Any=True,  no_browser: Any=Fa
     if not target_account:
         raise ValueError("目标账号不能为空。")
 
-    print_info(f"正在切换 gcloud 活跃账号为 {target_account}...")
-    result = subprocess.run(
-        [gcloud_command, "config", "set", "account", target_account],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
-        raise RuntimeError(
-            f"切换 gcloud 账号失败: {stderr_summary}。"
-            "如果这是一个尚未登录过的新账号，请使用“登录新账号”功能。"
+    current_account = str(get_current_gcloud_account() or "").strip()
+    if current_account.lower() == target_account.lower():
+        print_info(f"gcloud 活跃账号已是 {target_account}。")
+    else:
+        print_info(f"正在切换 gcloud 活跃账号为 {target_account}...")
+        result = subprocess.run(
+            [gcloud_command, "config", "set", "account", target_account],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
         )
-    clear_google_cloud_client_caches()
-
-    if sync_adc:
-        adc_cmd = [gcloud_command, "auth", "application-default", "login", target_account]
-        if no_browser:
-            adc_cmd.append("--no-browser")
-        print_info("正在同步 Application Default Credentials。")
-        print_info("此步骤可能打开浏览器，或要求您按 gcloud 提示完成授权。")
-        result = subprocess.run(adc_cmd)
         if result.returncode != 0:
+            stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
             raise RuntimeError(
-                "gcloud 活跃账号已切换，但同步 ADC 失败。"
-                "请重新执行切换账号，或手动运行 gcloud auth application-default login。"
+                f"切换 gcloud 账号失败: {stderr_summary}。"
+                "如果这是一个尚未登录过的新账号，请使用“登录新账号”功能。"
             )
         clear_google_cloud_client_caches()
 
+    if project_id:
+        set_gcloud_project(project_id)
+
+    if sync_adc:
+        sync_adc_account(target_account, no_browser=no_browser, quota_project=project_id)
+
+    if project_id and set_quota_project and get_current_adc_account():
+        set_adc_quota_project(project_id)
+
+    warn_if_adc_account_mismatch(target_account)
     print_success(f"已切换到账号: {target_account}")
     return target_account
 
-def list_active_projects_via_gcloud() -> Any:
+def list_active_projects_via_gcloud(account: Any = None) -> Any:
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
         raise RuntimeError("当前环境未找到 gcloud，无法通过 CLI 获取项目列表。")
 
-    result = subprocess.run(
+    command = [gcloud_command]
+    target_account = str(account or "").strip()
+    if target_account:
+        command.append(f"--account={target_account}")
+    command.extend(
         [
-            gcloud_command,
             "projects",
             "list",
             "--format=json(projectId,name,lifecycleState)",
-        ],
+        ]
+    )
+
+    result = subprocess.run(
+        command,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
@@ -303,13 +502,17 @@ def list_instances_via_gcloud(project_id: Any) -> Any:
     raw_instances = json.loads(result.stdout or "[]")
     return [build_instance_info_from_gcloud(item) for item in raw_instances]
 
-def select_gcp_project(allow_back: bool = False) -> Any:
+def select_gcp_project(allow_back: bool = False, account: Any = None) -> Any:
     print_info("正在扫描您的项目列表...")
     gcloud_command = find_gcloud_command()
+    target_account = str(account or "").strip()
     if gcloud_command:
         try:
-            print_info("优先通过本机 gcloud 获取项目列表...")
-            active_projects = list_active_projects_via_gcloud()
+            if target_account:
+                print_info(f"优先通过本机 gcloud 获取账号 {target_account} 的项目列表...")
+            else:
+                print_info("优先通过本机 gcloud 获取项目列表...")
+            active_projects = list_active_projects_via_gcloud(account=target_account)
             if active_projects:
                 result = prompt_project_selection(
                     active_projects,
@@ -319,10 +522,19 @@ def select_gcp_project(allow_back: bool = False) -> Any:
                 )
                 if result is None:
                     return None
+                apply_selected_project(result, account=target_account)
                 return result
             print_warning("gcloud 未返回任何活跃项目，将回退到 Resource Manager API。")
         except Exception as e:
             print_warning(f"通过 gcloud 列出项目失败，将回退到 Resource Manager API: {summarize_exception(e)}")
+
+    adc_account = str(get_current_adc_account() or "").strip()
+    if target_account and adc_account and target_account.lower() != adc_account.lower():
+        print_warning(
+            f"当前选择账号是 {target_account}，但 ADC 账号是 {adc_account}。"
+            "为避免混入其它账号的项目，已跳过 Resource Manager API 回退。"
+        )
+        return prompt_manual_project_id(allow_back=allow_back)
 
     try:
         client = projects_client()
@@ -346,6 +558,7 @@ def select_gcp_project(allow_back: bool = False) -> Any:
         )
         if result is None:
             return None
+        apply_selected_project(result, account=target_account)
         return result
     except Exception as e:
         print_warning(f"无法列出项目: {e}。请手动输入项目 ID。")
