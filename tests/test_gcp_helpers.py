@@ -120,8 +120,10 @@ class GcpHelpersTestCase(unittest.TestCase):
     @patch("gcp_firewall.wait_for_global_operation")
     @patch("gcp_firewall.firewall_rule_exists", return_value=False)
     @patch("gcp_firewall.insert_firewall_with_retry")
+    @patch("gcp_firewall.firewalls_client", return_value=SimpleNamespace())
     def test_add_allow_all_ingress_treats_existing_rule_as_success(
         self,
+        _mock_firewalls_client,
         mock_insert_firewall,
         _mock_rule_exists,
         mock_wait_operation,
