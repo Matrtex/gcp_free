@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 # 检查 root 权限
 if [ "$EUID" -ne 0 ]; then
@@ -22,10 +22,44 @@ SOURCE_FILE=""
 
 echo "=== 正在换源 ==="
 
+backup_existing_apt_sources() {
+    local backup_dir="/etc/apt/gcp-free-sources-backup-$(date +%Y%m%d%H%M%S)"
+    local moved=0
+
+    mkdir -p "$backup_dir/sources.list.d"
+
+    if [ -f /etc/apt/sources.list ]; then
+        mv /etc/apt/sources.list "$backup_dir/sources.list"
+        : > /etc/apt/sources.list
+        moved=1
+    fi
+
+    if [ -d /etc/apt/sources.list.d ]; then
+        while IFS= read -r -d '' source_path; do
+            mv "$source_path" "$backup_dir/sources.list.d/$(basename "$source_path")"
+            moved=1
+        done < <(
+            find /etc/apt/sources.list.d \
+                -maxdepth 1 \
+                -type f \
+                \( -name '*.list' -o -name '*.sources' \) \
+                -print0
+        )
+    fi
+
+    if [ "$moved" -eq 1 ]; then
+        echo "-> 已备份并禁用旧源: $backup_dir"
+    else
+        rmdir "$backup_dir/sources.list.d" "$backup_dir"
+    fi
+}
+
 case "$OS_ID" in
     debian)
         OS_CODENAME="${OS_CODENAME:-bookworm}"
+        backup_existing_apt_sources
         SOURCE_FILE="/etc/apt/sources.list.d/debian.sources"
+        mkdir -p "$(dirname "$SOURCE_FILE")"
         cat > "$SOURCE_FILE" <<EOF
 Types: deb deb-src
 URIs: http://mirrors.mit.edu/debian
@@ -42,7 +76,9 @@ EOF
         ;;
     ubuntu)
         OS_CODENAME="${OS_CODENAME:-jammy}"
+        backup_existing_apt_sources
         SOURCE_FILE="/etc/apt/sources.list.d/ubuntu.sources"
+        mkdir -p "$(dirname "$SOURCE_FILE")"
         cat > "$SOURCE_FILE" <<EOF
 Types: deb
 URIs: http://archive.ubuntu.com/ubuntu

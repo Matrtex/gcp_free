@@ -64,9 +64,25 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
             )
         ]
 
-        self.assertIn("iptables -P OUTPUT DROP", limit_block)
-        self.assertIn("iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", limit_block)
+        self.assertIn("apply_limit_rules", limit_block)
+        self.assertIn('LIMIT_CHAIN="GCP_FREE_LIMIT"', content)
+        self.assertIn('iptables -A "\\$chain" -j REJECT --reject-with icmp-port-unreachable', content)
+        self.assertIn('iptables -I OUTPUT 1 -j "\\$chain"', content)
+        self.assertNotIn("iptables -P INPUT DROP", limit_block)
+        self.assertNotIn("iptables -P FORWARD DROP", limit_block)
+        self.assertNotIn("iptables -P OUTPUT DROP", limit_block)
         self.assertNotIn("iptables -P OUTPUT ACCEPT", limit_block)
+
+    def test_net_iptables_reset_only_removes_managed_chain(self):
+        content = Path(ROOT_DIR, "scripts", "net_iptables.sh").read_text(encoding="utf-8")
+        reset_block = content[content.index("remove_limit_rules()") : content.index("# 3. 重置 vnStat 数据库")]
+
+        self.assertIn('while iptables -D OUTPUT -j "\\$chain"', reset_block)
+        self.assertIn('iptables -F "\\$chain" 2>/dev/null || true', reset_block)
+        self.assertIn('iptables -X "\\$chain" 2>/dev/null || true', reset_block)
+        self.assertNotIn("iptables -P INPUT ACCEPT", reset_block)
+        self.assertNotIn("iptables -P OUTPUT ACCEPT", reset_block)
+        self.assertNotIn("iptables -P FORWARD ACCEPT", reset_block)
 
     def test_net_shutdown_preserves_usage_after_limit(self):
         content = Path(ROOT_DIR, "scripts", "net_shutdown.sh").read_text(encoding="utf-8")
@@ -88,6 +104,11 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("allow_insecure: false", content)
         self.assertNotIn("allow_insecure: true", content)
 
+    def test_config_dae_is_not_gitignored(self):
+        content = Path(ROOT_DIR, ".gitignore").read_text(encoding="utf-8")
+
+        self.assertNotIn("config.dae", content.splitlines())
+
     def test_traffic_scripts_fail_fast_but_allow_missing_crontab(self):
         for script_name in ("net_iptables.sh", "net_shutdown.sh"):
             with self.subTest(script_name=script_name):
@@ -104,6 +125,16 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("debian.sources", content)
         self.assertIn("ubuntu.sources", content)
         self.assertIn("ubuntu-archive-keyring.gpg", content)
+        self.assertIn("backup_existing_apt_sources", content)
+        self.assertIn("/etc/apt/sources.list", content)
+        self.assertIn("find /etc/apt/sources.list.d", content)
+        self.assertNotIn("\nbackup_existing_apt_sources\n\ncase", content)
+        unsupported_block = content[content.index("    *)") :]
+        self.assertNotIn("backup_existing_apt_sources", unsupported_block)
+        debian_block = content[content.index("    debian)") : content.index("    ubuntu)")]
+        ubuntu_block = content[content.index("    ubuntu)") : content.index("    *)")]
+        self.assertIn("backup_existing_apt_sources", debian_block)
+        self.assertIn("backup_existing_apt_sources", ubuntu_block)
 
     @unittest.skipIf(shutil.which("bash") is None or os.name == "nt", "bash 不可用或当前为 Windows，跳过 shell 语法检查")
     def test_shell_scripts_have_valid_bash_syntax(self):
@@ -123,24 +154,50 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         content = Path(ROOT_DIR, ".github", "workflows", "release-command.yml").read_text(encoding="utf-8")
 
         self.assertIn("process.env.BUILD_VERSION", content)
-        self.assertIn("process.env.CREATE_RELEASE", content)
         self.assertIn("refs/pull/${context.issue.number}/head", content)
+        self.assertIn("workflow_id: 'pr-build-exe.yml'", content)
         self.assertIn("source_ref: sourceRef", content)
         self.assertIn("source_sha: sourceSha", content)
+        self.assertIn("source_label: sourceLabel", content)
+        self.assertIn("PR 评论不支持 /release-exe", content)
+        self.assertNotIn("workflow_id: 'release-exe.yml'", content)
+        self.assertNotIn("create_release", content)
+        self.assertNotIn("process.env.CREATE_RELEASE", content)
         self.assertNotIn("version: '${{ steps.parse.outputs.version }}'", content)
         self.assertNotIn("const version = '${{ steps.parse.outputs.version }}';", content)
 
-    def test_release_exe_workflow_reads_dispatch_inputs_from_environment(self):
+    def test_pr_build_exe_workflow_is_read_only_and_unsigned(self):
+        content = Path(ROOT_DIR, ".github", "workflows", "pr-build-exe.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch", content)
+        self.assertIn("contents: read", content)
+        self.assertNotIn("contents: write", content)
+        self.assertIn("ref: ${{ inputs.source_ref }}", content)
+        self.assertIn("persist-credentials: false", content)
+        self.assertIn("SOURCE_SHA: ${{ inputs.source_sha }}", content)
+        self.assertIn("python scripts/build_exe.py --clean --version $env:BUILD_VERSION", content)
+        self.assertNotIn("WINDOWS_CODESIGN", content)
+        self.assertNotIn("SIGN_PFX_PASSWORD", content)
+        self.assertNotIn("softprops/action-gh-release", content)
+
+    def test_release_exe_workflow_rejects_external_source_inputs(self):
         content = Path(ROOT_DIR, ".github", "workflows", "release-exe.yml").read_text(encoding="utf-8")
 
         self.assertIn("INPUT_VERSION: ${{ inputs.version }}", content)
         self.assertIn("$inputVersion = $env:INPUT_VERSION", content)
-        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", content)
-        self.assertIn("SOURCE_REF: ${{ inputs.source_ref }}", content)
-        self.assertIn("process.env.SOURCE_REF", content)
-        self.assertIn("target_commitish: ${{ inputs.source_sha || github.sha }}", content)
+        self.assertIn("拒绝外部源码输入", content)
+        self.assertIn("正式发布 workflow 只能构建当前默认分支或 tag 的可信代码", content)
+        self.assertIn("ref: ${{ github.ref }}", content)
+        self.assertIn("persist-credentials: false", content)
+        self.assertIn("target_commitish: ${{ github.sha }}", content)
+        self.assertIn("GIT_SHA: ${{ github.sha }}", content)
+        self.assertIn("GITHUB_SHA: ${{ github.sha }}", content)
+        self.assertNotIn("ref: ${{ inputs.source_ref || github.ref }}", content)
+        self.assertNotIn("SOURCE_REF: ${{ inputs.source_ref }}", content)
+        self.assertNotIn("process.env.SOURCE_REF", content)
+        self.assertNotIn("target_commitish: ${{ inputs.source_sha || github.sha }}", content)
         self.assertNotIn("core.getInput('source_ref')", content)
-        self.assertIn("跳过默认分支自动检查门禁", content)
+        self.assertNotIn("跳过默认分支自动检查门禁", content)
         self.assertIn("$version -notmatch", content)
         self.assertIn("steps.version.outputs.build_version", content)
         self.assertNotIn('$inputVersion = "${{ inputs.version }}"', content)

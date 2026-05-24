@@ -12,6 +12,8 @@ from gcp import (
     configure_stdio,
     create_instance,
     add_allow_all_ingress,
+    add_deny_cdn_egress,
+    delete_deny_cdn_egress,
     delete_managed_firewall_rules,
     find_instance_by_name,
     ensure_instance_running,
@@ -87,6 +89,17 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(ip_ranges, ["1.1.1.0/24", "2.2.2.0/24"])
 
     @patch("gcp_firewall.resolve_asset_path")
+    def test_read_cdn_ips_normalizes_bare_ips_to_cidr(self, mock_resolve_asset_path):
+        with TemporaryDirectory() as tmp_dir:
+            cdnip_path = Path(tmp_dir, "cdnip.txt")
+            cdnip_path.write_text("1.1.1.1\n2.2.2.7/24\n", encoding="utf-8")
+            mock_resolve_asset_path.return_value = cdnip_path
+
+            ip_ranges = read_cdn_ips()
+
+        self.assertEqual(ip_ranges, ["1.1.1.1/32", "2.2.2.0/24"])
+
+    @patch("gcp_firewall.resolve_asset_path")
     def test_read_cdn_ips_rejects_invalid_ip_range(self, mock_resolve_asset_path):
         with TemporaryDirectory() as tmp_dir:
             cdnip_path = Path(tmp_dir, "cdnip.txt")
@@ -123,6 +136,22 @@ class GcpHelpersTestCase(unittest.TestCase):
             )
 
         mock_add_deny_cdn_egress.assert_not_called()
+
+    @patch("gcp_firewall.add_deny_cdn_egress", return_value=True)
+    @patch("gcp_firewall.read_cdn_ips", return_value=[f"10.0.{index // 256}.{index % 256}/32" for index in range(300)])
+    def test_configure_firewall_non_interactive_passes_all_cdn_ranges_without_truncation(
+        self,
+        _mock_read_cdn_ips,
+        mock_add_deny_cdn_egress,
+    ):
+        configure_firewall_non_interactive(
+            "demo-project",
+            "global/networks/default",
+            deny_cdn_egress=True,
+        )
+
+        passed_ranges = mock_add_deny_cdn_egress.call_args.args[1]
+        self.assertEqual(len(passed_ranges), 300)
 
     def test_configure_stdio_uses_utf8_backslashreplace(self):
         fake_stdout = Mock()
@@ -192,6 +221,44 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_wait_operation.assert_not_called()
 
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
+    @patch("gcp_firewall.wait_for_global_operation")
+    @patch("gcp_firewall.firewall_rule_exists", return_value=False)
+    @patch("gcp_firewall.insert_firewall_with_retry", return_value=SimpleNamespace(name="op-1"))
+    @patch("gcp_firewall.firewalls_client", return_value=SimpleNamespace())
+    def test_add_deny_cdn_egress_splits_large_ip_lists(
+        self,
+        _mock_firewalls_client,
+        mock_insert_firewall,
+        _mock_rule_exists,
+        _mock_wait_operation,
+        mock_delete_deny_cdn,
+    ):
+        ip_ranges = [f"10.0.{index // 256}.{index % 256}/32" for index in range(300)]
+
+        self.assertTrue(add_deny_cdn_egress("demo-project", ip_ranges, "global/networks/default"))
+
+        mock_delete_deny_cdn.assert_called_once_with("demo-project", allow_cdn_message=False)
+        created_rules = [call_args.args[2] for call_args in mock_insert_firewall.call_args_list]
+        self.assertEqual([rule.name for rule in created_rules], [
+            "deny-cdn-egress-custom-001",
+            "deny-cdn-egress-custom-002",
+        ])
+        self.assertEqual(len(created_rules[0].destination_ranges), 256)
+        self.assertEqual(len(created_rules[1].destination_ranges), 44)
+
+    @patch("gcp_firewall.insert_firewall_with_retry")
+    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=False)
+    def test_add_deny_cdn_egress_stops_when_old_rules_cannot_be_cleaned(
+        self,
+        mock_delete_deny_cdn,
+        mock_insert_firewall,
+    ):
+        self.assertFalse(add_deny_cdn_egress("demo-project", ["10.0.0.1/32"], "global/networks/default"))
+
+        mock_delete_deny_cdn.assert_called_once_with("demo-project", allow_cdn_message=False)
+        mock_insert_firewall.assert_not_called()
+
+    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
     def test_configure_firewall_non_interactive_deletes_deny_cdn_rule(self, mock_delete_deny):
         configure_firewall_non_interactive(
             "demo-project",
@@ -201,15 +268,46 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         mock_delete_deny.assert_called_once_with("demo-project")
 
+    @patch("gcp_firewall.firewalls_client")
     @patch("gcp_firewall.delete_firewall_rule", return_value=True)
-    def test_delete_managed_firewall_rules_deletes_known_rules(self, mock_delete_rule):
+    def test_delete_deny_cdn_egress_deletes_base_and_split_rules(self, mock_delete_rule, mock_firewalls_client):
+        mock_firewalls_client.return_value = SimpleNamespace(
+            list=lambda **_kwargs: [
+                SimpleNamespace(name="allow-all-ingress-custom"),
+                SimpleNamespace(name="deny-cdn-egress-custom"),
+                SimpleNamespace(name="deny-cdn-egress-custom-001"),
+                SimpleNamespace(name="deny-cdn-egress-custom-extra"),
+            ]
+        )
+
+        self.assertTrue(delete_deny_cdn_egress("demo-project"))
+
+        self.assertEqual(
+            mock_delete_rule.call_args_list,
+            [
+                call("demo-project", "deny-cdn-egress-custom"),
+                call("demo-project", "deny-cdn-egress-custom-001"),
+            ],
+        )
+
+    @patch("gcp_firewall.firewalls_client")
+    @patch("gcp_firewall.delete_firewall_rule", return_value=True)
+    def test_delete_managed_firewall_rules_deletes_known_rules(self, mock_delete_rule, mock_firewalls_client):
+        mock_firewalls_client.return_value = SimpleNamespace(
+            list=lambda **_kwargs: [
+                SimpleNamespace(name="allow-all-ingress-custom"),
+                SimpleNamespace(name="deny-cdn-egress-custom-001"),
+                SimpleNamespace(name="unmanaged-rule"),
+            ]
+        )
+
         self.assertTrue(delete_managed_firewall_rules("demo-project"))
 
         self.assertEqual(
             mock_delete_rule.call_args_list,
             [
                 call("demo-project", "allow-all-ingress-custom"),
-                call("demo-project", "deny-cdn-egress-custom"),
+                call("demo-project", "deny-cdn-egress-custom-001"),
             ],
         )
 

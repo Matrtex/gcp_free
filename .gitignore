@@ -13,4 +13,3 @@ tests/__pycache__/
 .ruff_cache/
 build/
 dist/
-config.dae

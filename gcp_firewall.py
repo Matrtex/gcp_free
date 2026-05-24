@@ -4,8 +4,8 @@ import ipaddress
 
 from gcp_common import (
     Any,
-    FIREWALL_RULES_TO_CLEAN,
     LOGGER,
+    RESOURCE_LIST_REQUEST_TIMEOUT,
     RESOURCE_READ_REQUEST_TIMEOUT,
     compute_v1,
     disks_client,
@@ -51,6 +51,9 @@ __all__ = [
 
 ALLOW_ALL_INGRESS_RULE_NAME = "allow-all-ingress-custom"
 DENY_CDN_EGRESS_RULE_NAME = "deny-cdn-egress-custom"
+DENY_CDN_EGRESS_RULE_PREFIX = f"{DENY_CDN_EGRESS_RULE_NAME}-"
+FIREWALL_IP_RANGES_PER_RULE = 256
+FALLBACK_DENY_RULE_DELETE_LIMIT = 64
 
 def resolve_cdn_ip_path(filename: Any="cdnip.txt") -> Any:
     filename = str(filename)
@@ -77,12 +80,12 @@ def read_cdn_ips(filename: Any="cdnip.txt") -> Any:
             if not ip_range:
                 continue
             try:
-                ipaddress.ip_network(ip_range, strict=False)
+                network = ipaddress.ip_network(ip_range, strict=False)
             except ValueError as exc:
                 raise ValueError(
                     f"{resolved_filename}:{line_number} 不是有效的 IP 或 CIDR: {ip_range}"
                 ) from exc
-            ip_list.append(ip_range)
+            ip_list.append(str(network))
 
     print_info(f"已从 {resolved_filename} 读取到 {len(ip_list)} 个 IP 段。")
     return ip_list
@@ -126,6 +129,72 @@ def firewall_rule_exists(firewall_client: Any, project_id: Any, rule_name: Any) 
         print_warning(f"检查防火墙规则 {rule_name} 是否存在失败，将继续尝试创建: {summarize_exception(exc)}")
         return False
 
+def chunk_ip_ranges(ip_ranges: Any, chunk_size: Any=FIREWALL_IP_RANGES_PER_RULE) -> Any:
+    ranges = list(ip_ranges or [])
+    return [ranges[index:index + chunk_size] for index in range(0, len(ranges), chunk_size)]
+
+def get_deny_cdn_egress_rule_specs(ip_ranges: Any) -> Any:
+    chunks = chunk_ip_ranges(ip_ranges)
+    if not chunks:
+        return []
+    if len(chunks) == 1:
+        return [(DENY_CDN_EGRESS_RULE_NAME, chunks[0])]
+    return [
+        (f"{DENY_CDN_EGRESS_RULE_NAME}-{index:03d}", chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+def is_deny_cdn_egress_rule_name(rule_name: Any) -> Any:
+    rule_name = str(rule_name or "")
+    if rule_name == DENY_CDN_EGRESS_RULE_NAME:
+        return True
+    if not rule_name.startswith(DENY_CDN_EGRESS_RULE_PREFIX):
+        return False
+    suffix = rule_name[len(DENY_CDN_EGRESS_RULE_PREFIX):]
+    return len(suffix) == 3 and suffix.isdigit()
+
+def is_managed_firewall_rule_name(rule_name: Any) -> Any:
+    rule_name = str(rule_name or "")
+    return rule_name == ALLOW_ALL_INGRESS_RULE_NAME or is_deny_cdn_egress_rule_name(rule_name)
+
+def fallback_deny_cdn_rule_names() -> Any:
+    return [
+        DENY_CDN_EGRESS_RULE_NAME,
+        *[
+            f"{DENY_CDN_EGRESS_RULE_NAME}-{index:03d}"
+            for index in range(1, FALLBACK_DENY_RULE_DELETE_LIMIT + 1)
+        ],
+    ]
+
+def list_firewall_rule_names(project_id: Any, firewall_client: Any) -> Any:
+    try:
+        rules = firewall_client.list(
+            project=project_id,
+            timeout=RESOURCE_LIST_REQUEST_TIMEOUT,
+        )
+        return sorted(str(rule.name) for rule in rules if getattr(rule, "name", None))
+    except Exception as exc:
+        print_warning(f"列出防火墙规则失败，将使用兜底规则名清理: {summarize_exception(exc)}")
+        return None
+
+def get_deny_cdn_rule_names_to_delete(project_id: Any, firewall_client: Any) -> Any:
+    rule_names = list_firewall_rule_names(project_id, firewall_client)
+    if rule_names is None:
+        return fallback_deny_cdn_rule_names()
+    return [rule_name for rule_name in rule_names if is_deny_cdn_egress_rule_name(rule_name)]
+
+def get_managed_firewall_rule_names_to_delete(project_id: Any, firewall_client: Any) -> Any:
+    rule_names = list_firewall_rule_names(project_id, firewall_client)
+    if rule_names is None:
+        return [
+            ALLOW_ALL_INGRESS_RULE_NAME,
+            *fallback_deny_cdn_rule_names(),
+        ]
+    return [rule_name for rule_name in rule_names if is_managed_firewall_rule_name(rule_name)]
+
+def describe_managed_firewall_rules() -> Any:
+    return f"{ALLOW_ALL_INGRESS_RULE_NAME}, {DENY_CDN_EGRESS_RULE_NAME} 及其拆分规则"
+
 def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
     rule_name = ALLOW_ALL_INGRESS_RULE_NAME
@@ -161,13 +230,8 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
             LOGGER.error(traceback.format_exc())
             return False
 
-def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
-    if not ip_ranges:
-        print_info("IP 列表为空，跳过创建拒绝规则。")
-        return True
-
+def add_single_deny_cdn_egress_rule(project_id: Any,  rule_name: Any,  ip_ranges: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
-    rule_name = DENY_CDN_EGRESS_RULE_NAME
 
     print_info(f"正在创建出站拒绝规则: {rule_name} ...")
     if firewall_rule_exists(firewall_client, project_id, rule_name):
@@ -189,7 +253,7 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
         operation = insert_firewall_with_retry(firewall_client, project_id, firewall_rule)
         print_info("正在应用规则...")
         wait_for_global_operation(project_id, operation.name, f"创建防火墙规则 {rule_name}")
-        print_success(f"已添加拒绝规则，共拦截 {len(ip_ranges)} 个 IP 段。")
+        print_success(f"已添加拒绝规则 {rule_name}，共拦截 {len(ip_ranges)} 个 IP 段。")
         return True
     except Exception as e:
         if is_already_exists_error(e, rule_name):
@@ -199,6 +263,29 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
             print_warning(f"创建防火墙规则失败: {summarize_exception(e)}")
             LOGGER.error(traceback.format_exc())
             return False
+
+def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
+    rule_specs = get_deny_cdn_egress_rule_specs(ip_ranges)
+    if not rule_specs:
+        print_info("IP 列表为空，跳过创建拒绝规则。")
+        return True
+
+    print_info("正在按当前 cdnip.txt 重建拒绝 CDN 出站规则。")
+    if not delete_deny_cdn_egress(project_id, allow_cdn_message=False):
+        print_warning("清理旧的拒绝 CDN 出站规则失败，已停止创建新规则。")
+        return False
+
+    if len(rule_specs) > 1:
+        total_ip_ranges = sum(len(rule_ip_ranges) for _rule_name, rule_ip_ranges in rule_specs)
+        print_info(
+            f"IP 数量 ({total_ip_ranges}) 超过 GCP 单条规则上限 "
+            f"({FIREWALL_IP_RANGES_PER_RULE})，将拆分为 {len(rule_specs)} 条规则。"
+        )
+
+    all_ok = True
+    for rule_name, rule_ip_ranges in rule_specs:
+        all_ok = add_single_deny_cdn_egress_rule(project_id, rule_name, rule_ip_ranges, network) and all_ok
+    return all_ok
 
 def configure_firewall(project_id: Any,  network: Any) -> Any:
     print_info("防火墙规则管理菜单")
@@ -218,10 +305,6 @@ def configure_firewall(project_id: Any,  network: Any) -> Any:
         elif choice == "2":
             ips = read_cdn_ips()
             if ips:
-                if len(ips) > 256:
-                    print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
-                    print_warning("脚本将只取前 256 个 IP。")
-                    ips = ips[:256]
                 add_deny_cdn_egress(project_id, ips, network)
         elif choice == "3":
             delete_deny_cdn_egress(project_id)
@@ -268,11 +351,6 @@ def configure_firewall_non_interactive(
         if not ips:
             print_warning("已要求添加拒绝 CDN 出站规则，但 IP 列表为空，无法创建规则。")
             all_ok = False
-        elif len(ips) > 256:
-            print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
-            print_warning("脚本将只取前 256 个 IP。")
-            ips = ips[:256]
-            all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
         else:
             all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
     else:
@@ -297,14 +375,30 @@ def delete_firewall_rule(project_id: Any,  rule_name: Any) -> Any:
         print_warning(f"删除防火墙规则失败: {rule_name} ({e})")
         return False
 
-def delete_deny_cdn_egress(project_id: Any) -> Any:
-    print_info("正在删除拒绝 CDN 出站规则，删除后将允许 CDN 访问。")
-    return delete_firewall_rule(project_id, DENY_CDN_EGRESS_RULE_NAME)
+def delete_deny_cdn_egress(project_id: Any, allow_cdn_message: Any=True) -> Any:
+    if allow_cdn_message:
+        print_info("正在删除拒绝 CDN 出站规则，删除后将允许 CDN 访问。")
+    else:
+        print_info("正在清理旧的拒绝 CDN 出站规则。")
+    firewall_client = firewalls_client()
+    rule_names = get_deny_cdn_rule_names_to_delete(project_id, firewall_client)
+    if not rule_names:
+        print_info("未发现本工具添加的拒绝 CDN 出站规则。")
+        return True
+    all_ok = True
+    for rule_name in rule_names:
+        all_ok = delete_firewall_rule(project_id, rule_name) and all_ok
+    return all_ok
 
 def delete_managed_firewall_rules(project_id: Any) -> Any:
     print_info("正在删除本工具添加的全部防火墙规则...")
+    firewall_client = firewalls_client()
+    rule_names = get_managed_firewall_rule_names_to_delete(project_id, firewall_client)
+    if not rule_names:
+        print_info("未发现本工具添加的防火墙规则。")
+        return True
     all_ok = True
-    for rule_name in FIREWALL_RULES_TO_CLEAN:
+    for rule_name in rule_names:
         all_ok = delete_firewall_rule(project_id, rule_name) and all_ok
     return all_ok
 
@@ -333,7 +427,7 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
     print_info("即将删除以下资源（可以重新创建免费资源）：")
     print_info(f"- 实例: {instance_name} ({zone})")
     print_info("- 相关磁盘（如仍存在）")
-    print_info(f"- 防火墙规则: {', '.join(FIREWALL_RULES_TO_CLEAN)}")
+    print_info(f"- 防火墙规则: {describe_managed_firewall_rules()}")
     if not confirmed:
         confirm = input("请输入 DELETE 确认删除: ").strip()
         if confirm != "DELETE":

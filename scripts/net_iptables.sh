@@ -50,6 +50,8 @@ echo "--> 生成监控脚本 /root/check_traffic.sh..."
 cat > /root/check_traffic.sh <<EOF
 #!/bin/bash
 
+set -euo pipefail
+
 # 强制使用标准区域设置
 export LC_ALL=C
 
@@ -57,10 +59,26 @@ export LC_ALL=C
 LOG_FILE="/var/log/traffic_monitor.log"
 INTERFACE="$INTERFACE"
 LIMIT=180
+LIMIT_CHAIN="GCP_FREE_LIMIT"
 
 # 日志记录函数 (保持原格式)
 log() {
     echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\$LOG_FILE"
+}
+
+apply_limit_rules() {
+    local chain="\$LIMIT_CHAIN"
+
+    iptables -N "\$chain" 2>/dev/null || true
+    iptables -F "\$chain"
+    iptables -A "\$chain" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    iptables -A "\$chain" -o lo -j RETURN
+    iptables -A "\$chain" -j REJECT --reject-with icmp-port-unreachable
+
+    while iptables -D OUTPUT -j "\$chain" 2>/dev/null; do
+        :
+    done
+    iptables -I OUTPUT 1 -j "\$chain"
 }
 
 # 权限检查
@@ -71,7 +89,7 @@ fi
 
 # 获取流量数据 (强制使用 'b' 参数获取字节单位)
 # 输出格式示例: 1;ens4;2026-01-15;RX_BYTES;TX_BYTES;...
-VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null)
+VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null || true)
 
 # 提取出站流量 (TX)，第 10 个字段
 TX_BYTES=\$(echo "\$VNSTAT_RAW" | cut -d ';' -f 10)
@@ -106,21 +124,10 @@ if [ \$(echo "\$TX_GB >= \$LIMIT" | bc) -eq 1 ]; then
     echo "状态: [警告] 流量已超限，正在应用防火墙规则..."
     log "警告：流量超出限制！正在执行封禁策略..."
     
-    # 封禁策略：默认阻断新建出站连接，避免继续消耗 TX 免费额度。
-    iptables -F
-    iptables -X
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT DROP
+    # 只在 OUTPUT 上挂接本工具专用链，避免清空用户已有的 Docker/ufw/系统防火墙规则。
+    apply_limit_rules
     
-    # 放行已建立连接和 SSH，避免当前管理会话被断开。
-    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o lo -j ACCEPT
-    
-    log "网络已限制 (仅保留 SSH 和已建立连接)。"
+    log "网络已限制 (阻断新建出站连接，保留已建立连接和本地回环)。"
 else
     echo "状态: [正常] 流量未超限。"
     log "流量正常。"
@@ -132,12 +139,25 @@ echo "--> 生成重置脚本 /root/reset_network.sh..."
 cat > /root/reset_network.sh <<EOF
 #!/bin/bash
 
+set -euo pipefail
+
 RESET_LOG="/var/log/network_reset.log"
 TRAFFIC_LOG="/var/log/traffic_monitor.log"
 INTERFACE="$INTERFACE"
+LIMIT_CHAIN="GCP_FREE_LIMIT"
 
 log() {
     echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\$RESET_LOG"
+}
+
+remove_limit_rules() {
+    local chain="\$LIMIT_CHAIN"
+
+    while iptables -D OUTPUT -j "\$chain" 2>/dev/null; do
+        :
+    done
+    iptables -F "\$chain" 2>/dev/null || true
+    iptables -X "\$chain" 2>/dev/null || true
 }
 
 log "开始执行每月网络重置..."
@@ -150,17 +170,13 @@ else
     log "流量监控日志不存在，无需删除。"
 fi
 
-# 2. 重置防火墙规则
-iptables -P INPUT ACCEPT
-iptables -P OUTPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -F
-iptables -X
-log "防火墙规则已重置，限制已解除。"
+# 2. 仅移除本工具安装的流量限制规则
+remove_limit_rules
+log "本工具流量限制规则已清除，限制已解除。"
 
 # 3. 重置 vnStat 数据库
-systemctl stop vnstat
-vnstat --remove --force -i "\$INTERFACE"
+systemctl stop vnstat || true
+vnstat --remove --force -i "\$INTERFACE" 2>/dev/null || true
 vnstat --add -i "\$INTERFACE"
 systemctl start vnstat
 
