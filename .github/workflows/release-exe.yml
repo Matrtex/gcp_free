@@ -278,6 +278,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.build_version }}
+          target_commitish: ${{ inputs.source_sha || github.sha }}
           name: ${{ steps.version.outputs.build_version }}
           draft: ${{ steps.version.outputs.release_draft == 'true' }}
           body: ${{ steps.version.outputs.release_notes }}

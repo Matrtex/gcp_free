@@ -54,6 +54,40 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("cut -d ';' -f 10", content)
         self.assertNotIn("cut -d ';' -f 5", content)
 
+    def test_net_iptables_blocks_new_outbound_connections_after_limit(self):
+        content = Path(ROOT_DIR, "scripts", "net_iptables.sh").read_text(encoding="utf-8")
+        limit_marker = 'if [ \\$(echo "\\$TX_GB >= \\$LIMIT"'
+        limit_block = content[
+            content.index(limit_marker) : content.index(
+                "else",
+                content.index(limit_marker),
+            )
+        ]
+
+        self.assertIn("iptables -P OUTPUT DROP", limit_block)
+        self.assertIn("iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", limit_block)
+        self.assertNotIn("iptables -P OUTPUT ACCEPT", limit_block)
+
+    def test_net_shutdown_preserves_usage_after_limit(self):
+        content = Path(ROOT_DIR, "scripts", "net_shutdown.sh").read_text(encoding="utf-8")
+        limit_marker = 'if [ \\$(echo "\\$TX_GB >= \\$LIMIT"'
+        limit_block = content[
+            content.index(limit_marker) : content.index(
+                "else",
+                content.index(limit_marker),
+            )
+        ]
+
+        self.assertIn("保留 vnStat 统计和日志", limit_block)
+        self.assertNotIn("vnstat --remove --force", limit_block)
+        self.assertNotIn('rm -f "\\$LOG_FILE"', limit_block)
+
+    def test_default_dae_config_keeps_insecure_tls_disabled(self):
+        content = Path(ROOT_DIR, "config.dae").read_text(encoding="utf-8")
+
+        self.assertIn("allow_insecure: false", content)
+        self.assertNotIn("allow_insecure: true", content)
+
     def test_traffic_scripts_fail_fast_but_allow_missing_crontab(self):
         for script_name in ("net_iptables.sh", "net_shutdown.sh"):
             with self.subTest(script_name=script_name):
@@ -104,6 +138,7 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", content)
         self.assertIn("SOURCE_REF: ${{ inputs.source_ref }}", content)
         self.assertIn("process.env.SOURCE_REF", content)
+        self.assertIn("target_commitish: ${{ inputs.source_sha || github.sha }}", content)
         self.assertNotIn("core.getInput('source_ref')", content)
         self.assertIn("跳过默认分支自动检查门禁", content)
         self.assertIn("$version -notmatch", content)

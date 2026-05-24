@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+
 from gcp_common import (
     Any,
     FIREWALL_RULES_TO_CLEAN,
@@ -67,11 +69,20 @@ def read_cdn_ips(filename: Any="cdnip.txt") -> Any:
 
     ip_list = []
     with open(resolved_filename, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             clean_line = line.strip()
-            if clean_line:
-                ip = clean_line.split()[0]
-                ip_list.append(ip)
+            if not clean_line or clean_line.startswith("#"):
+                continue
+            ip_range = clean_line.split("#", 1)[0].split()[0].strip()
+            if not ip_range:
+                continue
+            try:
+                ipaddress.ip_network(ip_range, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{resolved_filename}:{line_number} 不是有效的 IP 或 CIDR: {ip_range}"
+                ) from exc
+            ip_list.append(ip_range)
 
     print_info(f"已从 {resolved_filename} 读取到 {len(ip_list)} 个 IP 段。")
     return ip_list

@@ -76,12 +76,25 @@ class GcpHelpersTestCase(unittest.TestCase):
     def test_read_cdn_ips_resolves_default_file_from_runtime_assets(self, mock_resolve_asset_path):
         with TemporaryDirectory() as tmp_dir:
             cdnip_path = Path(tmp_dir, "cdnip.txt")
-            cdnip_path.write_text("1.1.1.0/24 comment\n\n2.2.2.0/24\n", encoding="utf-8")
+            cdnip_path.write_text(
+                "# GCP CDN ranges\n1.1.1.0/24 comment\n\n2.2.2.0/24 # inline\n",
+                encoding="utf-8",
+            )
             mock_resolve_asset_path.return_value = cdnip_path
 
             ip_ranges = read_cdn_ips()
 
         self.assertEqual(ip_ranges, ["1.1.1.0/24", "2.2.2.0/24"])
+
+    @patch("gcp_firewall.resolve_asset_path")
+    def test_read_cdn_ips_rejects_invalid_ip_range(self, mock_resolve_asset_path):
+        with TemporaryDirectory() as tmp_dir:
+            cdnip_path = Path(tmp_dir, "cdnip.txt")
+            cdnip_path.write_text("1.1.1.0/24\nnot-an-ip\n", encoding="utf-8")
+            mock_resolve_asset_path.return_value = cdnip_path
+
+            with self.assertRaisesRegex(ValueError, "不是有效的 IP 或 CIDR"):
+                read_cdn_ips()
 
     @patch("gcp_firewall.add_allow_all_ingress", return_value=False)
     def test_configure_firewall_non_interactive_raises_when_rule_creation_fails(

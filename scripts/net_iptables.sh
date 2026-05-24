@@ -106,19 +106,21 @@ if [ \$(echo "\$TX_GB >= \$LIMIT" | bc) -eq 1 ]; then
     echo "状态: [警告] 流量已超限，正在应用防火墙规则..."
     log "警告：流量超出限制！正在执行封禁策略..."
     
-    # 封禁策略
+    # 封禁策略：默认阻断新建出站连接，避免继续消耗 TX 免费额度。
     iptables -F
     iptables -X
     iptables -P INPUT DROP
     iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
+    iptables -P OUTPUT DROP
     
-    # 放行规则
-    iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    # 放行已建立连接和 SSH，避免当前管理会话被断开。
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
     iptables -A INPUT -i lo -j ACCEPT
     iptables -A OUTPUT -o lo -j ACCEPT
     
-    log "网络已限制 (仅保留 SSH)。"
+    log "网络已限制 (仅保留 SSH 和已建立连接)。"
 else
     echo "状态: [正常] 流量未超限。"
     log "流量正常。"
