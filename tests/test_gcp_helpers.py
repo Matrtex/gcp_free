@@ -19,6 +19,7 @@ from gcp import (
     get_instance_with_retry,
     get_reroll_cooldown_policy,
     get_soft_exception_count,
+    LOGIN_NEW_ACCOUNT_MARKER,
     handle_setup_cli,
     handle_login_account_cli,
     handle_switch_account_cli,
@@ -413,7 +414,46 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertEqual(selected, "second@example.com")
         mock_select_account.assert_called_once()
+        self.assertTrue(mock_select_account.call_args.kwargs["allow_login_new"])
         mock_switch_account.assert_called_once_with("second@example.com", sync_adc=False)
+
+    @patch("gcp_instance.login_gcloud_account_interactive", return_value="new@example.com")
+    @patch("gcp_instance.switch_gcloud_account")
+    @patch("gcp_instance.select_gcloud_account", return_value=LOGIN_NEW_ACCOUNT_MARKER)
+    @patch(
+        "gcp_instance.list_gcloud_accounts_via_gcloud",
+        return_value=[
+            {"account": "first@example.com", "status": "ACTIVE", "active": True},
+        ],
+    )
+    def test_select_startup_gcloud_account_can_login_new_account(
+        self,
+        _mock_accounts,
+        mock_select_account,
+        mock_switch_account,
+        mock_login_interactive,
+    ):
+        selected = select_startup_gcloud_account()
+
+        self.assertEqual(selected, "new@example.com")
+        self.assertTrue(mock_select_account.call_args.kwargs["allow_login_new"])
+        mock_login_interactive.assert_called_once()
+        mock_switch_account.assert_not_called()
+
+    @patch("builtins.input", side_effect=["3"])
+    @patch(
+        "gcp_instance.list_gcloud_accounts_via_gcloud",
+        return_value=[
+            {"account": "first@example.com", "status": "ACTIVE", "active": True},
+            {"account": "second@example.com", "status": "UNKNOWN", "active": False},
+        ],
+    )
+    def test_select_gcloud_account_offers_login_new_choice(self, _mock_accounts, _mock_input):
+        from gcp import select_gcloud_account
+
+        selected = select_gcloud_account(allow_login_new=True)
+
+        self.assertEqual(selected, LOGIN_NEW_ACCOUNT_MARKER)
 
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
     @patch("gcp_instance.subprocess.run")

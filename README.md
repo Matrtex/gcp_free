@@ -127,7 +127,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## 常用命令
 
-如果本机登录了多个 gcloud 账号，直接运行 `.\start.ps1` 时会先让你选择账号，再扫描该账号可访问的项目。选择项目后脚本会同步：
+直接运行 `.\start.ps1` 时会先让你选择已有 gcloud 账号，也可以选择“登录新账号”。选择或登录账号后，再扫描该账号可访问的项目。选择项目后脚本会同步：
 
 - `gcloud` 活跃账号
 - `Application Default Credentials`

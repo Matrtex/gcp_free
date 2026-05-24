@@ -57,6 +57,7 @@ from gcp_utils import (
 )
 
 __all__ = [
+    'LOGIN_NEW_ACCOUNT_MARKER',
     'list_gcloud_accounts_via_gcloud',
     'get_current_gcloud_account',
     'clear_adc_account_cache',
@@ -69,6 +70,7 @@ __all__ = [
     'prepare_gcloud_context',
     'select_startup_gcloud_account',
     'select_gcloud_account',
+    'login_gcloud_account_interactive',
     'login_gcloud_account',
     'switch_gcloud_account',
     'list_active_projects_via_gcloud',
@@ -100,6 +102,7 @@ _ADC_ACCOUNT_CACHE = {
     "loaded": False,
     "value": "",
 }
+LOGIN_NEW_ACCOUNT_MARKER = "__GCP_FREE_LOGIN_NEW_ACCOUNT__"
 
 def clear_adc_account_cache() -> Any:
     _ADC_ACCOUNT_CACHE["loaded"] = False
@@ -331,35 +334,52 @@ def select_startup_gcloud_account() -> Any:
         return get_current_gcloud_account() or None
 
     if not accounts:
-        print_warning("当前没有已登录的 gcloud 账号，请先使用“登录新账号”功能或运行 gcloud auth login。")
-        return None
+        print_warning("当前没有已登录的 gcloud 账号，可选择登录新账号。")
 
-    selected_account = None
-    if len(accounts) == 1:
-        selected_account = accounts[0]["account"]
-        print_info(f"检测到唯一 gcloud 账号: {selected_account}")
-    else:
-        selected_account = select_gcloud_account()
+    selected_account = select_gcloud_account(allow_login_new=True, accounts=accounts)
 
     if not selected_account:
         return None
+    if selected_account == LOGIN_NEW_ACCOUNT_MARKER:
+        return login_gcloud_account_interactive()
 
     return switch_gcloud_account(selected_account, sync_adc=False)
 
-def select_gcloud_account(allow_back: bool = False) -> Any:
-    print_info("正在读取本机 gcloud 登录账号...")
-    accounts = list_gcloud_accounts_via_gcloud()
+def select_gcloud_account(allow_back: bool = False, allow_login_new: bool = False, accounts: Any = None) -> Any:
+    if accounts is None:
+        print_info("正在读取本机 gcloud 登录账号...")
+        accounts = list_gcloud_accounts_via_gcloud()
     if not accounts:
-        raise RuntimeError("未找到任何 gcloud 已登录账号，请先运行 gcloud auth login。")
+        if not allow_login_new:
+            raise RuntimeError("未找到任何 gcloud 已登录账号，请先运行 gcloud auth login。")
+        accounts = []
+
+    choices = list(accounts)
+    if allow_login_new:
+        choices.append({"account": LOGIN_NEW_ACCOUNT_MARKER, "status": "LOGIN_NEW", "active": False})
+
+    def render_account_choice(item: Any) -> Any:
+        if item.get("account") == LOGIN_NEW_ACCOUNT_MARKER:
+            return "登录新账号（浏览器授权）"
+        return f"{item['account']} {'[当前激活]' if item['active'] else ''}".strip()
+
     selected = select_from_list(
-        accounts,
+        choices,
         "请选择目标账号",
-        lambda item: f"{item['account']} {'[当前激活]' if item['active'] else ''}".strip(),
+        render_account_choice,
         allow_back=allow_back,
     )
     if selected is None:
         return None
     return selected["account"]
+
+def login_gcloud_account_interactive() -> Any:
+    target_account = input("请输入要登录的新账号邮箱（留空则在浏览器中自行选择）: ").strip()
+    no_browser_choice = input("是否使用无浏览器模式登录? (y/N): ").strip().lower()
+    return login_gcloud_account(
+        target_account or None,
+        no_browser=no_browser_choice in {"y", "yes"},
+    )
 
 def login_gcloud_account(account: Any=None,  no_browser: Any=False) -> Any:
     gcloud_command = find_gcloud_command()
