@@ -440,7 +440,7 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_login_interactive.assert_called_once()
         mock_switch_account.assert_not_called()
 
-    @patch("builtins.input", side_effect=["3"])
+    @patch("gcp_instance.select_from_list")
     @patch(
         "gcp_instance.list_gcloud_accounts_via_gcloud",
         return_value=[
@@ -448,9 +448,17 @@ class GcpHelpersTestCase(unittest.TestCase):
             {"account": "second@example.com", "status": "UNKNOWN", "active": False},
         ],
     )
-    def test_select_gcloud_account_offers_login_new_choice(self, _mock_accounts, _mock_input):
+    def test_select_gcloud_account_offers_login_new_choice(self, _mock_accounts, mock_select_from_list):
         from gcp import select_gcloud_account
 
+        def select_login_choice(choices, prompt_text, render_item, allow_back=False):
+            self.assertEqual(prompt_text, "请选择目标账号")
+            self.assertFalse(allow_back)
+            rendered_choices = [render_item(item) for item in choices]
+            self.assertIn("登录新账号（浏览器授权）", rendered_choices)
+            return next(item for item in choices if item["account"] == LOGIN_NEW_ACCOUNT_MARKER)
+
+        mock_select_from_list.side_effect = select_login_choice
         selected = select_gcloud_account(allow_login_new=True)
 
         self.assertEqual(selected, LOGIN_NEW_ACCOUNT_MARKER)
