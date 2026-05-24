@@ -84,6 +84,10 @@ Add-CommandDirectoryToPath $GcloudCommand
 if (-not (Test-Path $VenvPython)) {
     Write-Info "Creating virtual environment..."
     python -m venv .venv
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorMessage "Failed to create virtual environment."
+        exit $LASTEXITCODE
+    }
 }
 
 $CurrentDepsHash = Get-RequirementsHash
@@ -95,6 +99,10 @@ if (Test-Path $DepsHashFile) {
 if ($CurrentDepsHash -ne $InstalledDepsHash) {
     Write-Info "Installing Python dependencies from requirements.txt ..."
     & $VenvPython -m pip install -r $RequirementsFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorMessage "Failed to install Python dependencies."
+        exit $LASTEXITCODE
+    }
     Set-Content -Path $DepsHashFile -Value $CurrentDepsHash -NoNewline
 } else {
     Write-Info "Python dependencies are up to date."
@@ -102,3 +110,4 @@ if ($CurrentDepsHash -ne $InstalledDepsHash) {
 
 Write-Info "Starting gcp.py ..."
 & $VenvPython -u gcp.py @ArgsFromCaller
+exit $LASTEXITCODE

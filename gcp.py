@@ -11,9 +11,11 @@ def _run() -> None:
             _app.main()
     except KeyboardInterrupt:
         print("\n[用户终止] 脚本已停止。")
+        sys.exit(130)
     except Exception as exc:
         _app.print_error(f"发生异常: {_app.summarize_exception(exc)}")
         _app.LOGGER.error(_app.traceback.format_exc())
+        sys.exit(1)
 
 
 if __name__ == "__main__":

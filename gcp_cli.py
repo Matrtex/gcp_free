@@ -75,6 +75,8 @@ __all__ = [
     'build_remote_config_from_args',
     'prepare_cli_account_context',
     'get_cli_instance',
+    'normalize_firewall_network',
+    'resolve_firewall_network_from_args',
     'prepare_cli_remote_instance',
     'handle_create_cli',
     'handle_list_instances_cli',
@@ -194,6 +196,31 @@ def get_cli_instance(args: Any) -> Any:
         )
     return find_instance_by_name(args.project_id, args.instance, getattr(args, "zone", None))
 
+def normalize_firewall_network(network: Any) -> Any:
+    network_text = str(network or "").strip()
+    if not network_text:
+        return None
+    if network_text.startswith("http://") or network_text.startswith("https://"):
+        return network_text
+    if network_text.startswith("global/networks/"):
+        return network_text
+    return f"global/networks/{network_text}"
+
+def resolve_firewall_network_from_args(args: Any) -> Any:
+    network = normalize_firewall_network(getattr(args, "network", None))
+    if network:
+        return network
+
+    instance_name = getattr(args, "instance", None)
+    if instance_name:
+        instance_info = get_cli_instance(args)
+        return instance_info.network or "global/networks/default"
+
+    if getattr(args, "allow_all_ingress", False) or getattr(args, "deny_cdn_egress", False):
+        raise ValueError("添加防火墙规则时必须提供 --instance 或 --network。")
+
+    return "global/networks/default"
+
 def prepare_cli_remote_instance(args: Any) -> Any:
     instance_info = get_cli_instance(args)
     remote_config = build_remote_config_from_args(args)
@@ -272,8 +299,7 @@ def handle_reroll_ip_amd_cli(args: Namespace) -> None:
     )
 
 def handle_firewall_cli(args: Namespace) -> None:
-    instance_info = get_cli_instance(args)
-    network = instance_info.network or "global/networks/default"
+    network = resolve_firewall_network_from_args(args)
     configure_firewall_non_interactive(
         args.project_id,
         network,
@@ -580,8 +606,14 @@ def build_arg_parser() -> Any:
 
     firewall_parser = subparsers.add_parser(
         "firewall",
-        parents=[instance_parent],
+        parents=[project_parent],
         help=ACTION_SPEC_MAP["firewall"].description,
+    )
+    firewall_parser.add_argument("--instance", help="实例名称；添加规则时用于自动读取实例所在网络")
+    firewall_parser.add_argument("--zone", help="实例所在可用区；存在同名实例时建议显式指定")
+    firewall_parser.add_argument(
+        "--network",
+        help="目标 VPC 网络名称或 global/networks/<name>；删除规则时可省略",
     )
     firewall_parser.add_argument(
         "--allow-all-ingress",

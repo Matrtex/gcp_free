@@ -77,12 +77,13 @@ bash start.sh
 
 首次运行会：
 
-1. 启用所需 GCP API
+1. 检查本机是否存在 `gcloud` 和 `python3`
 2. 创建并进入 venv
 3. 按 `requirements.txt` 安装依赖
 4. 执行 `gcp.py`
 
 再次运行会比较 `requirements.txt` 的哈希，只有依赖变更时才重新安装。
+`start.sh` 会把命令行参数原样转发给 `gcp.py`，因此也可以执行 `bash start.sh doctor --project-id <你的项目ID>` 这类非交互命令。
 
 ## 手动运行
 
@@ -197,11 +198,11 @@ python scripts/build_exe.py --clean --version v1.0.0
 ```powershell
 .\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --allow-all-ingress
 .\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --deny-cdn-egress
-.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --delete-deny-cdn-egress
-.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --delete-managed-rules
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --delete-deny-cdn-egress
+.\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --delete-managed-rules
 ```
 
-重复添加已存在的防火墙规则会视为成功并跳过；`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。
+重复添加已存在的防火墙规则会视为成功并跳过；`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。添加规则默认从 `--instance` 读取网络，也可以显式传入 `--network default` 或 `--network global/networks/default`；删除规则不需要实例仍然存在。
 
 一键部署流程：
 

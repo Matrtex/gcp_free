@@ -658,16 +658,14 @@ cd /tmp/ || (
     echo_yellow "Failed to cd /tmp/"
     exit 1
 )
-if [ "$1" = "" ] || [ "$1" = "use-cdn" ]; then
-    if [ "$1" = "use-cdn" ]; then
-        use_cdn='yes'
-    fi
-    should_we_install_dae
+if [ "$#" -eq 0 ]; then
+    no_args='yes'
 fi
 while [ $# != 0 ]; do
     case "$1" in
     install-prerelease | install-prereleases)
         allow_prereleases='yes'
+        action_requested='yes'
         shift
         ;;
     use-cdn)
@@ -676,26 +674,32 @@ while [ $# != 0 ]; do
         ;;
     install)
         normal_install='yes'
+        action_requested='yes'
         shift
         ;;
     force-install)
         force_install='yes'
+        action_requested='yes'
         shift
         ;;
     update-geoip)
         geoip_should_update='yes'
+        action_requested='yes'
         shift
         ;;
     update-geosite)
         geosite_should_update='yes'
+        action_requested='yes'
         shift
         ;;
     help)
         show_help='yes'
+        action_requested='yes'
         shift
         ;;
     *)
         error_help='yes'
+        action_requested='yes'
         echo_red "error: Unknown command: $1"
         shift
         ;;
@@ -708,6 +712,9 @@ fi
 if [ "$error_help" = 'yes' ]; then
     show_helps
     exit 1
+fi
+if [ "$no_args" = 'yes' ] || { [ "$use_cdn" = 'yes' ] && [ "$action_requested" != 'yes' ]; }; then
+    normal_install='yes'
 fi
 if [ "$force_install" = 'yes' ] || [ "$normal_install" = 'yes' ] || [ "$allow_prereleases" = "yes" ]; then
     should_we_install_dae

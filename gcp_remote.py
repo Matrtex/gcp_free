@@ -153,9 +153,6 @@ def prepare_local_script_for_upload(script_key: Any,  traffic_limit_gb: Any=TRAF
     if not local_script:
         return None, None
 
-    if script_key not in {"net_iptables", "net_shutdown"}:
-        return local_script, None
-
     script_content = render_local_script_content(script_key, traffic_limit_gb=traffic_limit_gb)
     if script_content is None:
         return None, None

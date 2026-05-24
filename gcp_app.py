@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import traceback
 
 from gcp_utils import *
@@ -23,6 +24,8 @@ if __name__ == "__main__":
             main()
     except KeyboardInterrupt:
         print("\n[用户终止] 脚本已停止。")
+        sys.exit(130)
     except Exception as e:
         print_error(f"发生异常: {summarize_exception(e)}")
         LOGGER.error(traceback.format_exc())
+        sys.exit(1)

@@ -22,6 +22,7 @@ from gcp import (
     handle_setup_cli,
     handle_login_account_cli,
     handle_switch_account_cli,
+    handle_firewall_cli,
     handle_reroll_ip_amd_cli,
     handle_reroll_ip_cli,
     is_transient_gcp_error,
@@ -540,26 +541,71 @@ class GcpHelpersTestCase(unittest.TestCase):
             "firewall",
             "--project-id",
             "demo-project",
-            "--instance",
-            "vm-1",
-            "--zone",
-            "us-west1-a",
             "--delete-deny-cdn-egress",
         ])
         managed_args = parse_args([
             "firewall",
             "--project-id",
             "demo-project",
-            "--instance",
-            "vm-1",
-            "--zone",
-            "us-west1-a",
             "--delete-managed-rules",
         ])
 
         self.assertTrue(deny_args.delete_deny_cdn_egress)
         self.assertFalse(deny_args.delete_managed_rules)
+        self.assertIsNone(deny_args.instance)
         self.assertTrue(managed_args.delete_managed_rules)
+
+    @patch("gcp_cli.configure_firewall_non_interactive")
+    @patch("gcp_cli.get_cli_instance")
+    def test_firewall_cli_delete_does_not_require_instance_lookup(
+        self,
+        mock_get_instance,
+        mock_configure_firewall,
+    ):
+        args = parse_args([
+            "firewall",
+            "--project-id",
+            "demo-project",
+            "--delete-deny-cdn-egress",
+        ])
+
+        handle_firewall_cli(args)
+
+        mock_get_instance.assert_not_called()
+        mock_configure_firewall.assert_called_once()
+        self.assertEqual(mock_configure_firewall.call_args.args[:2], ("demo-project", "global/networks/default"))
+
+    def test_firewall_cli_add_requires_instance_or_network(self):
+        args = parse_args([
+            "firewall",
+            "--project-id",
+            "demo-project",
+            "--allow-all-ingress",
+        ])
+
+        with self.assertRaisesRegex(ValueError, "--instance 或 --network"):
+            handle_firewall_cli(args)
+
+    @patch("gcp_cli.configure_firewall_non_interactive")
+    @patch("gcp_cli.get_cli_instance")
+    def test_firewall_cli_add_can_use_explicit_network(
+        self,
+        mock_get_instance,
+        mock_configure_firewall,
+    ):
+        args = parse_args([
+            "firewall",
+            "--project-id",
+            "demo-project",
+            "--network",
+            "default",
+            "--allow-all-ingress",
+        ])
+
+        handle_firewall_cli(args)
+
+        mock_get_instance.assert_not_called()
+        self.assertEqual(mock_configure_firewall.call_args.args[:2], ("demo-project", "global/networks/default"))
 
     def test_switch_account_cli_command_parses(self):
         args = parse_args([

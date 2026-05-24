@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ PACKAGE_FILES = [
     "geoip_config.json",
 ]
 PACKAGE_DIRS = ["scripts"]
+SAFE_PACKAGE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def parse_args():
@@ -42,6 +44,13 @@ def parse_args():
         default="http://timestamp.digicert.com",
     )
     return parser.parse_args()
+
+
+def validate_package_component(value, field_name):
+    text = str(value or "").strip()
+    if not SAFE_PACKAGE_COMPONENT_RE.fullmatch(text):
+        raise ValueError(f"{field_name} 只能包含字母、数字、点、下划线和短横线，且长度不能超过 128。")
+    return text
 
 
 def add_data_argument(path, target):
@@ -209,14 +218,15 @@ def main():
     args = parse_args()
     ensure_windows()
 
-    version = args.version.strip() or "manual-build"
+    version = validate_package_component((args.version or "").strip() or "manual-build", "version")
+    name = validate_package_component((args.name or "").strip() or "gcp_free", "name")
     if args.clean:
         clean_outputs()
 
-    exe_path = build_pyinstaller_exe(args.name, onefile=args.onefile)
+    exe_path = build_pyinstaller_exe(name, onefile=args.onefile)
     if args.sign_pfx:
         sign_executable(exe_path, args.sign_pfx, args.sign_password, args.timestamp_url)
-    package_dir, zip_path = make_release_package(exe_path, version, args.name)
+    package_dir, zip_path = make_release_package(exe_path, version, name)
 
     print(f"EXE_PATH={exe_path}")
     print(f"PACKAGE_DIR={package_dir}")

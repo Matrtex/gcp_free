@@ -41,10 +41,6 @@ if [[ ! -f "$INIT_MARKER" ]]; then
     exit 1
   fi
 
-  echo "[初始化] 正在启用所需的 GCP API..."
-  gcloud services enable cloudresourcemanager.googleapis.com
-  gcloud services enable compute.googleapis.com
-
   if [[ -d "$VENV_DIR" && ! -f "$VENV_DIR/bin/activate" ]]; then
     echo "[初始化] 检测到 venv 不完整，正在重新创建..."
     python3 -m venv --clear "$VENV_DIR"
@@ -94,4 +90,4 @@ else
   echo "[初始化] Python 依赖已是最新。"
 fi
 
-exec python -u gcp.py
+exec python -u gcp.py "$@"

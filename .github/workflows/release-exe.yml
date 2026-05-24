@@ -146,29 +146,56 @@ jobs:
 
       - name: 运行测试
         run: |
-          python -m py_compile gcp.py gcp_app.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_firewall.py gcp_instance.py gcp_ips.py gcp_logging.py gcp_menu.py gcp_models.py gcp_operations.py gcp_remote.py gcp_reroll.py gcp_state.py gcp_utils.py scripts/build_exe.py
+          python -m py_compile gcp.py gcp_app.py gcp_cli.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_firewall.py gcp_instance.py gcp_ips.py gcp_logging.py gcp_menu.py gcp_models.py gcp_operations.py gcp_remote.py gcp_reroll.py gcp_state.py gcp_utils.py scripts/build_exe.py
           python -m unittest discover -s tests -v
 
       - name: 计算构建版本
+        id: version
         shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CREATE_RELEASE: ${{ inputs.create_release }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_RELEASE_NOTES: ${{ inputs.release_notes }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+          GIT_SHA: ${{ github.sha }}
         run: |
-          $eventName = "${{ github.event_name }}"
-          $inputVersion = "${{ inputs.version }}"
-          $createRelease = "${{ inputs.create_release }}"
-          $draftRelease = "${{ inputs.draft }}"
-          $releaseNotes = @"
-          ${{ inputs.release_notes }}
-          "@
+          $eventName = $env:GITHUB_EVENT_NAME
+          $inputVersion = $env:INPUT_VERSION
+          $createRelease = $env:INPUT_CREATE_RELEASE
+          $draftRelease = $env:INPUT_DRAFT
+          $releaseNotes = $env:INPUT_RELEASE_NOTES
+
+          if ([string]::IsNullOrWhiteSpace($createRelease)) {
+            $createRelease = "false"
+          }
+          if ([string]::IsNullOrWhiteSpace($draftRelease)) {
+            $draftRelease = "true"
+          }
 
           if ($eventName -eq "push") {
-            $version = "${{ github.ref_name }}"
+            $version = $env:REF_NAME
             $createRelease = "true"
             $draftRelease = "false"
             $releaseNotes = "自动从 tag ${version} 构建并发布 Windows EXE。"
           } elseif ([string]::IsNullOrWhiteSpace($inputVersion)) {
-            $version = "manual-${{ github.run_number }}-${{ github.sha }}".Substring(0, 22)
+            $manualVersion = "manual-$($env:RUN_NUMBER)-$($env:GIT_SHA)"
+            $version = $manualVersion.Substring(0, [Math]::Min(22, $manualVersion.Length))
           } else {
             $version = $inputVersion.Trim()
+          }
+
+          if ($version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+            throw "version 只能包含字母、数字、点、下划线和短横线，且长度不能超过 128。"
+          }
+          $createRelease = $createRelease.ToLowerInvariant()
+          $draftRelease = $draftRelease.ToLowerInvariant()
+          if ($createRelease -notin @("true", "false")) {
+            throw "create_release 必须是 true 或 false。"
+          }
+          if ($draftRelease -notin @("true", "false")) {
+            throw "draft 必须是 true 或 false。"
           }
 
           if ($createRelease -eq "true" -and [string]::IsNullOrWhiteSpace($inputVersion) -and $eventName -ne "push") {
@@ -178,9 +205,19 @@ jobs:
           "BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CREATE_RELEASE=$createRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_DRAFT=$draftRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_NOTES<<EOF" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "build_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "create_release=$createRelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_draft=$draftRelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          do {
+            $notesDelimiter = [Guid]::NewGuid().ToString("N")
+          } while (($releaseNotes | Out-String).Contains($notesDelimiter))
+          "RELEASE_NOTES<<$notesDelimiter" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $releaseNotes | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $notesDelimiter | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "release_notes<<$notesDelimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $releaseNotes | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $notesDelimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: 构建 EXE
         shell: pwsh
@@ -190,7 +227,7 @@ jobs:
             "scripts/build_exe.py",
             "--clean",
             "--version",
-            "${{ env.BUILD_VERSION }}"
+            $env:BUILD_VERSION
           )
           if (-not [string]::IsNullOrWhiteSpace($env:SIGN_PFX_PATH)) {
             $command += @("--sign-pfx", $env:SIGN_PFX_PATH, "--sign-password", $env:SIGN_PFX_PASSWORD)
@@ -211,18 +248,18 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: gcp-free-windows-exe-${{ env.BUILD_VERSION }}
+          name: gcp-free-windows-exe-${{ steps.version.outputs.build_version }}
           path: dist/release/*
           if-no-files-found: error
           retention-days: 30
 
       - name: 创建 GitHub Release
-        if: env.CREATE_RELEASE == 'true'
+        if: steps.version.outputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.BUILD_VERSION }}
-          name: ${{ env.BUILD_VERSION }}
-          draft: ${{ env.RELEASE_DRAFT == 'true' }}
-          body: ${{ env.RELEASE_NOTES }}
+          tag_name: ${{ steps.version.outputs.build_version }}
+          name: ${{ steps.version.outputs.build_version }}
+          draft: ${{ steps.version.outputs.release_draft == 'true' }}
+          body: ${{ steps.version.outputs.release_notes }}
           files: |
             dist/release/*.zip

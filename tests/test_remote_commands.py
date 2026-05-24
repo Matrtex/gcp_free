@@ -1,3 +1,5 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +8,8 @@ from gcp import (
     build_remote_exec_command,
     build_remote_status_command,
     build_remote_upload_command,
+    cleanup_temp_upload_file,
+    prepare_local_script_for_upload,
     render_local_script_content,
 )
 
@@ -50,6 +54,21 @@ class RemoteCommandTestCase(unittest.TestCase):
         content = render_local_script_content("net_shutdown", traffic_limit_gb=123)
         self.assertIn("LIMIT=123", content)
         self.assertNotIn("LIMIT=180", content)
+
+    @patch("gcp_remote.get_local_script_path")
+    def test_prepare_local_script_for_upload_normalizes_shell_line_endings(self, mock_get_local_script_path):
+        with TemporaryDirectory() as tmp_dir:
+            script_path = Path(tmp_dir, "dae.sh")
+            script_path.write_bytes(b"#!/usr/bin/env sh\r\necho ok\r\n")
+            mock_get_local_script_path.return_value = str(script_path)
+
+            upload_path, source_path = prepare_local_script_for_upload("dae")
+            try:
+                self.assertEqual(source_path, str(script_path))
+                self.assertNotEqual(upload_path, str(script_path))
+                self.assertEqual(Path(upload_path).read_bytes(), b"#!/usr/bin/env sh\necho ok\n")
+            finally:
+                cleanup_temp_upload_file(upload_path, source_path)
 
     def test_build_remote_status_command_contains_expected_tools(self):
         command = build_remote_status_command()

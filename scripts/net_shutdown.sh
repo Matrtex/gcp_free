@@ -70,8 +70,8 @@ fi
 # 获取流量数据 (强制使用 'b' 参数获取字节单位)
 VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null)
 
-# 提取出站流量 (TX)，第 5 个字段
-TX_BYTES=\$(echo "\$VNSTAT_RAW" | cut -d ';' -f 5)
+# 提取当月出站流量 (TX)，第 10 个字段
+TX_BYTES=\$(echo "\$VNSTAT_RAW" | cut -d ';' -f 10)
 
 # 如果获取失败或为空，默认为 0
 if [[ -z "\$TX_BYTES" ]]; then
