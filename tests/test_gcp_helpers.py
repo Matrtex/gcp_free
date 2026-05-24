@@ -2,13 +2,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 import subprocess
 
 from gcp import (
     classify_reroll_exception,
     clear_adc_account_cache,
     configure_firewall_non_interactive,
+    configure_stdio,
+    create_instance,
     add_allow_all_ingress,
     delete_managed_firewall_rules,
     find_instance_by_name,
@@ -92,6 +94,38 @@ class GcpHelpersTestCase(unittest.TestCase):
                 "global/networks/default",
                 allow_all_ingress=True,
             )
+
+    @patch("gcp_firewall.add_deny_cdn_egress")
+    @patch("gcp_firewall.read_cdn_ips", return_value=[])
+    def test_configure_firewall_non_interactive_raises_when_deny_cdn_ip_list_empty(
+        self,
+        _mock_read_cdn_ips,
+        mock_add_deny_cdn_egress,
+    ):
+        with self.assertRaises(RuntimeError):
+            configure_firewall_non_interactive(
+                "demo-project",
+                "global/networks/default",
+                deny_cdn_egress=True,
+            )
+
+        mock_add_deny_cdn_egress.assert_not_called()
+
+    def test_configure_stdio_uses_utf8_backslashreplace(self):
+        fake_stdout = Mock()
+        fake_stderr = Mock()
+
+        with patch("gcp_utils.sys", SimpleNamespace(stdout=fake_stdout, stderr=fake_stderr)):
+            configure_stdio()
+
+        expected_call = call(
+            encoding="utf-8",
+            errors="backslashreplace",
+            line_buffering=True,
+            write_through=True,
+        )
+        self.assertEqual(fake_stdout.reconfigure.call_args, expected_call)
+        self.assertEqual(fake_stderr.reconfigure.call_args, expected_call)
 
     def test_is_already_exists_error_checks_wrapped_cause(self):
         try:
@@ -180,6 +214,58 @@ class GcpHelpersTestCase(unittest.TestCase):
             get_instance_cache_key("demo-project", instance),
             "demo-project:us-west1-a:vm-1",
         )
+
+    @patch("gcp_instance.build_instance_info")
+    @patch("gcp_instance.get_instance_with_retry")
+    @patch("gcp_instance.wait_for_operation", return_value=SimpleNamespace(error=None))
+    @patch("gcp_instance.insert_instance_with_retry")
+    @patch("gcp_instance.get_image_from_family_with_retry")
+    @patch("gcp_instance.images_client", return_value=SimpleNamespace())
+    @patch("gcp_instance.instances_client", return_value=SimpleNamespace())
+    def test_create_instance_sets_default_network_field(
+        self,
+        _mock_instances_client,
+        _mock_images_client,
+        mock_get_image,
+        mock_insert_instance,
+        _mock_wait_operation,
+        mock_get_instance,
+        mock_build_instance_info,
+    ):
+        expected_instance = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="AMD Rome",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_get_image.return_value = SimpleNamespace(self_link="projects/debian-cloud/global/images/debian-12")
+        mock_insert_instance.return_value = SimpleNamespace(name="insert-op")
+        mock_get_instance.return_value = SimpleNamespace(
+            network_interfaces=[
+                SimpleNamespace(
+                    access_configs=[
+                        SimpleNamespace(nat_i_p="35.1.2.3"),
+                    ],
+                )
+            ]
+        )
+        mock_build_instance_info.return_value = expected_instance
+
+        result = create_instance(
+            "demo-project",
+            "us-west1-a",
+            {"name": "Debian 12", "project": "debian-cloud", "family": "debian-12"},
+            instance_name="vm-1",
+        )
+
+        self.assertEqual(result, expected_instance)
+        instance_resource = mock_insert_instance.call_args.args[3]
+        network_interface = instance_resource.network_interfaces[0]
+        self.assertEqual(network_interface.network, "global/networks/default")
+        self.assertNotEqual(getattr(network_interface, "name", None), "global/networks/default")
 
     def test_load_reroll_stats_from_file_supports_resume_payload(self):
         with TemporaryDirectory() as tmp_dir:

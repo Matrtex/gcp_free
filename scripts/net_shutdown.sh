@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # ==========================================
 # 流量监控自动部署脚本 (关机版)
 # 功能：
@@ -135,7 +137,7 @@ chmod +x /root/check_traffic.sh
 
 # 8. 设置定时任务
 echo "--> 更新 Crontab 定时任务..."
-crontab -l > /tmp/cron_bk 2>/dev/null
+crontab -l > /tmp/cron_bk 2>/dev/null || true
 
 # 清理所有旧任务 (包括 check_traffic 和 reset_network)
 sed -i '/check_traffic.sh/d' /tmp/cron_bk

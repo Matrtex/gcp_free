@@ -84,7 +84,12 @@ def configure_stdio() -> Any:
         if not stream or not hasattr(stream, "reconfigure"):
             continue
         try:
-            stream.reconfigure(line_buffering=True, write_through=True)
+            stream.reconfigure(
+                encoding="utf-8",
+                errors="backslashreplace",
+                line_buffering=True,
+                write_through=True,
+            )
         except Exception:
             continue
 

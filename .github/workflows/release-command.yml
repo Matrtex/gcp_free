@@ -37,10 +37,21 @@ jobs:
               core.setFailed('使用 /release-exe 时必须附带版本号，例如 /release-exe v1.2.3');
               return;
             }
+            const pull = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            const sourceRef = `refs/pull/${context.issue.number}/head`;
+            const sourceSha = pull.data.head.sha;
+            const sourceLabel = `${pull.data.head.repo.full_name}:${pull.data.head.ref}`;
             core.setOutput('version', version);
             core.setOutput('create_release', String(createRelease));
             core.setOutput('draft', createRelease ? 'false' : 'true');
             core.setOutput('command', command);
+            core.setOutput('source_ref', sourceRef);
+            core.setOutput('source_sha', sourceSha);
+            core.setOutput('source_label', sourceLabel);
 
       - name: 触发发布工作流
         if: success()
@@ -50,12 +61,18 @@ jobs:
           CREATE_RELEASE: ${{ steps.parse.outputs.create_release }}
           RELEASE_DRAFT: ${{ steps.parse.outputs.draft }}
           COMMENT_COMMAND: ${{ steps.parse.outputs.command }}
+          SOURCE_REF: ${{ steps.parse.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.parse.outputs.source_sha }}
+          SOURCE_LABEL: ${{ steps.parse.outputs.source_label }}
         with:
           script: |
             const version = process.env.BUILD_VERSION || '';
             const createRelease = process.env.CREATE_RELEASE || 'false';
             const draft = process.env.RELEASE_DRAFT || 'true';
             const command = process.env.COMMENT_COMMAND || '';
+            const sourceRef = process.env.SOURCE_REF || '';
+            const sourceSha = process.env.SOURCE_SHA || '';
+            const sourceLabel = process.env.SOURCE_LABEL || '';
 
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
@@ -66,7 +83,9 @@ jobs:
                 version,
                 create_release: createRelease,
                 draft,
-                release_notes: `由评论指令 ${command} 触发。`
+                release_notes: `由评论指令 ${command} 触发。源代码：${sourceLabel} (${sourceSha})。`,
+                source_ref: sourceRef,
+                source_sha: sourceSha
               }
             });
 
@@ -81,8 +100,8 @@ jobs:
             const version = process.env.BUILD_VERSION || '';
             const createRelease = process.env.CREATE_RELEASE === 'true';
             const summary = createRelease
-              ? `已触发 EXE 发布工作流，目标版本 \`${version}\`。`
-              : `已触发 EXE 构建工作流${version ? `，版本标识 \`${version}\`` : ''}。`;
+              ? `已触发 EXE 发布工作流，目标版本 \`${version}\`，构建 PR 当前代码。`
+              : `已触发 EXE 构建工作流${version ? `，版本标识 \`${version}\`` : ''}，构建 PR 当前代码。`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,

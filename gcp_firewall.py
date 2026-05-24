@@ -254,11 +254,15 @@ def configure_firewall_non_interactive(
 
     if deny_cdn_egress:
         ips = read_cdn_ips(cdnip_filename)
-        if ips:
-            if len(ips) > 256:
-                print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
-                print_warning("脚本将只取前 256 个 IP。")
-                ips = ips[:256]
+        if not ips:
+            print_warning("已要求添加拒绝 CDN 出站规则，但 IP 列表为空，无法创建规则。")
+            all_ok = False
+        elif len(ips) > 256:
+            print_warning(f"IP 数量 ({len(ips)}) 超过 GCP 单条规则上限 (256)。")
+            print_warning("脚本将只取前 256 个 IP。")
+            ips = ips[:256]
+            all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
+        else:
             all_ok = add_deny_cdn_egress(project_id, ips, network) and all_ok
     else:
         print_info("已跳过出站规则配置。")

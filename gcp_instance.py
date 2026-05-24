@@ -720,7 +720,7 @@ def create_instance(project_id: Any,  zone: Any,  os_config: Any,  instance_name
         disk.initialize_params = initialize_params
 
         network_interface = compute_v1.NetworkInterface()
-        network_interface.name = "global/networks/default"
+        network_interface.network = "global/networks/default"
 
         access_config = compute_v1.AccessConfig()
         access_config.name = "External NAT"

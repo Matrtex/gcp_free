@@ -22,7 +22,8 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
                 "missing-state-for-test.json",
             ],
             cwd=ROOT_DIR,
-            text=True,
+            encoding="utf-8",
+            errors="backslashreplace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=20,
@@ -53,6 +54,14 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("cut -d ';' -f 10", content)
         self.assertNotIn("cut -d ';' -f 5", content)
 
+    def test_traffic_scripts_fail_fast_but_allow_missing_crontab(self):
+        for script_name in ("net_iptables.sh", "net_shutdown.sh"):
+            with self.subTest(script_name=script_name):
+                content = Path(ROOT_DIR, "scripts", script_name).read_text(encoding="utf-8")
+
+                self.assertIn("set -euo pipefail", content)
+                self.assertIn("crontab -l > /tmp/cron_bk 2>/dev/null || true", content)
+
     def test_apt_script_contains_separate_debian_and_ubuntu_sources(self):
         content = Path(ROOT_DIR, "scripts", "apt.sh").read_text(encoding="utf-8")
 
@@ -81,6 +90,9 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
 
         self.assertIn("process.env.BUILD_VERSION", content)
         self.assertIn("process.env.CREATE_RELEASE", content)
+        self.assertIn("refs/pull/${context.issue.number}/head", content)
+        self.assertIn("source_ref: sourceRef", content)
+        self.assertIn("source_sha: sourceSha", content)
         self.assertNotIn("version: '${{ steps.parse.outputs.version }}'", content)
         self.assertNotIn("const version = '${{ steps.parse.outputs.version }}';", content)
 
@@ -89,6 +101,11 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
 
         self.assertIn("INPUT_VERSION: ${{ inputs.version }}", content)
         self.assertIn("$inputVersion = $env:INPUT_VERSION", content)
+        self.assertIn("ref: ${{ inputs.source_ref || github.ref }}", content)
+        self.assertIn("SOURCE_REF: ${{ inputs.source_ref }}", content)
+        self.assertIn("process.env.SOURCE_REF", content)
+        self.assertNotIn("core.getInput('source_ref')", content)
+        self.assertIn("跳过默认分支自动检查门禁", content)
         self.assertIn("$version -notmatch", content)
         self.assertIn("steps.version.outputs.build_version", content)
         self.assertNotIn('$inputVersion = "${{ inputs.version }}"', content)
