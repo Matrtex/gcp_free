@@ -215,6 +215,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             "demo-project:us-west1-a:vm-1",
         )
 
+    @patch("gcp_instance.print")
     @patch("gcp_instance.build_instance_info")
     @patch("gcp_instance.get_instance_with_retry")
     @patch("gcp_instance.wait_for_operation", return_value=SimpleNamespace(error=None))
@@ -231,6 +232,7 @@ class GcpHelpersTestCase(unittest.TestCase):
         _mock_wait_operation,
         mock_get_instance,
         mock_build_instance_info,
+        _mock_print,
     ):
         expected_instance = InstanceInfo(
             name="vm-1",
