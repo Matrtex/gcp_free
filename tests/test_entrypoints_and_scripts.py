@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,10 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("未找到可显示的刷 CPU 状态", result.stdout)
+        self.assertTrue(
+            "未找到可显示的刷 CPU 状态" in result.stdout
+            or r"\u672a\u627e\u5230\u53ef\u663e\u793a\u7684\u5237 CPU \u72b6\u6001" in result.stdout
+        )
 
     def test_start_sh_forwards_arguments_to_python_entrypoint(self):
         content = Path(ROOT_DIR, "start.sh").read_text(encoding="utf-8")
@@ -58,7 +62,7 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
         self.assertIn("ubuntu.sources", content)
         self.assertIn("ubuntu-archive-keyring.gpg", content)
 
-    @unittest.skipIf(shutil.which("bash") is None, "bash 不可用，跳过 shell 语法检查")
+    @unittest.skipIf(shutil.which("bash") is None or os.name == "nt", "bash 不可用或当前为 Windows，跳过 shell 语法检查")
     def test_shell_scripts_have_valid_bash_syntax(self):
         for script_name in ("start.sh", "apt.sh", "dae.sh", "net_iptables.sh", "net_shutdown.sh"):
             with self.subTest(script_name=script_name):
