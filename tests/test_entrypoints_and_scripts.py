@@ -205,6 +205,13 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
             content.index("$eventName = $env:GITHUB_EVENT_NAME") : content.index("      - name: 构建 EXE")
         ]
         self.assertNotIn("${{ inputs.release_notes }}", version_block)
+        test_index = content.index("      - name: 运行测试")
+        signing_index = content.index("      - name: 准备代码签名证书")
+        build_index = content.index("      - name: 构建 EXE")
+        self.assertLess(test_index, signing_index)
+        self.assertLess(signing_index, build_index)
+        self.assertIn("SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}", content)
+        self.assertNotIn("SIGN_PFX_PASSWORD=$env:WINDOWS_CODESIGN_CERT_PASSWORD", content)
 
     def test_build_exe_rejects_unsafe_package_components(self):
         self.assertEqual(validate_package_component("v1.2.3", "version"), "v1.2.3")

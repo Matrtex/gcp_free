@@ -13,12 +13,6 @@ LOCAL_SCRIPT_FILES = {
 # 流量监控默认限额，单位 GB；远程上传脚本前会用这个值覆盖脚本里的兜底默认值。
 TRAFFIC_LIMIT_GB = 180
 
-# 删除免费资源时顺带清理的防火墙规则名。
-FIREWALL_RULES_TO_CLEAN = [
-    "allow-all-ingress-custom",
-    "deny-cdn-egress-custom",
-]
-
 # GCP Compute Engine 免费层支持的区域（e2-micro 免费）
 FREE_TIER_REGIONS = [
     {"name": "俄勒冈 (Oregon) [美国] - 免费层", "region": "us-west1", "default_zone": "us-west1-b"},

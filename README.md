@@ -272,7 +272,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## GitHub Actions
 
-仓库现在包含四条 GitHub Actions：
+仓库现在包含五条 GitHub Actions：
 
 - `自动检查`
   在 `push` 到 `master` 和 `pull_request` 时自动执行语法检查与单元测试。
@@ -283,7 +283,9 @@ python scripts/build_exe.py --clean --version v1.0.0
   1. 在 GitHub Actions 页面手动运行 `workflow_dispatch`
   2. 推送形如 `v1.2.3` 的 Git tag，自动构建并创建 Release
 - `PR 评论指令触发 EXE 构建`
-  在 GitHub PR 评论里发送指令后，自动转发到 EXE 构建/发布工作流
+  在 GitHub PR 评论里发送指令后，自动转发到只读、无签名的 PR EXE 构建工作流，不会创建 Release。
+- `PR Windows EXE 构建`
+  由 PR 评论指令触发，只构建并上传 artifact，不读取发布或签名密钥。
 - `清理 GitHub Actions 缓存`
   每天北京时间 03:30 自动清理 Actions cache，也支持手动触发；默认删除 7 天未访问的 cache，并在总量超过 6 GB 时按最久未访问优先删除。
 
@@ -311,16 +313,15 @@ gh workflow run "清理 GitHub Actions 缓存" -f max_age_days=7 -f max_cache_gb
 ```text
 /build-exe
 /build-exe v1.2.3
-/release-exe v1.2.3
 ```
 
 出于安全考虑，评论触发只接受仓库 `OWNER` / `MEMBER` / `COLLABORATOR` 在 **PR 评论** 中发出的指令。
+PR 评论不支持创建 Release；创建正式 Release 请在默认分支或 tag 上运行 `构建并发布 Windows EXE` workflow。
 
 含义如下：
 
 - `/build-exe`：只构建并上传 artifact
 - `/build-exe v1.2.3`：构建时附带版本标识，但不创建 Release
-- `/release-exe v1.2.3`：构建后自动创建 GitHub Release 并上传 ZIP 包
 
 ### EXE 代码签名
 

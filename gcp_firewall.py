@@ -436,6 +436,7 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
     else:
         print_info("已通过非交互参数确认删除。")
 
+    cleanup_ok = True
     instance_client = instances_client()
     disk_names = []
     try:
@@ -450,6 +451,7 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
                     print_warning(f"无法解析磁盘来源: {disk.source}")
     except Exception as e:
         print_warning(f"读取实例信息失败，磁盘清理可能不完整: {e}")
+        cleanup_ok = False
 
     print_info("正在删除实例...")
     try:
@@ -466,6 +468,7 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
     disks_deleted = delete_disks_if_needed(project_id, zone, disk_names)
     if not disks_deleted:
         print_warning("部分磁盘删除失败，请手动检查控制台。")
+        cleanup_ok = False
 
     print_info("正在检查项目中其他实例...")
     try:
@@ -477,11 +480,19 @@ def delete_free_resources(project_id: Any,  instance_info: Any,  confirmed: Any=
 
         if not remaining_instances:
             print_info("项目中无其他实例，正在清理防火墙规则...")
-            delete_managed_firewall_rules(project_id)
+            firewall_rules_deleted = delete_managed_firewall_rules(project_id)
+            if not firewall_rules_deleted:
+                print_warning("部分防火墙规则清理失败，请手动检查控制台。")
+                cleanup_ok = False
         else:
             print_info(f"项目中还有 {len(remaining_instances)} 个其他实例，保留防火墙规则。")
     except Exception as e:
         print_warning(f"获取实例列表失败，将跳过防火墙规则清理: {e}")
+        cleanup_ok = False
+
+    if not cleanup_ok:
+        print_warning("清理未完全完成，请手动检查控制台确认残留资源。")
+        return False
 
     print_success("清理完成。建议到控制台确认无残留资源。")
     return True

@@ -138,28 +138,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: 准备代码签名证书
-        shell: pwsh
-        env:
-          WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
-          WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
-          WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PASSWORD)) {
-            Write-Host "未配置代码签名证书，跳过签名准备。"
-            exit 0
-          }
-
-          $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
-          $timestampUrl = $env:WINDOWS_CODESIGN_TIMESTAMP_URL
-          if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
-            $timestampUrl = "http://timestamp.digicert.com"
-          }
-          "SIGN_PFX_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "SIGN_PFX_PASSWORD=$env:WINDOWS_CODESIGN_CERT_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "SIGN_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: 运行测试
         run: |
           python -m py_compile gcp.py gcp_app.py gcp_cli.py gcp_clients.py gcp_config.py gcp_doctor.py gcp_firewall.py gcp_instance.py gcp_ips.py gcp_logging.py gcp_menu.py gcp_models.py gcp_operations.py gcp_remote.py gcp_reroll.py gcp_state.py gcp_utils.py scripts/build_exe.py
@@ -235,10 +213,32 @@ jobs:
           $releaseNotes | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $notesDelimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      - name: 准备代码签名证书
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
+          WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
+          WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_CERT_PASSWORD)) {
+            Write-Host "未配置代码签名证书，跳过签名准备。"
+            exit 0
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
+          $timestampUrl = $env:WINDOWS_CODESIGN_TIMESTAMP_URL
+          if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+            $timestampUrl = "http://timestamp.digicert.com"
+          }
+          "SIGN_PFX_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGN_TIMESTAMP_URL=$timestampUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 构建 EXE
         shell: pwsh
         env:
           GITHUB_SHA: ${{ github.sha }}
+          SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
         run: |
           $command = @(
             "python",

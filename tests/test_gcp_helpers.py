@@ -14,6 +14,7 @@ from gcp import (
     add_allow_all_ingress,
     add_deny_cdn_egress,
     delete_deny_cdn_egress,
+    delete_free_resources,
     delete_managed_firewall_rules,
     find_instance_by_name,
     ensure_instance_running,
@@ -310,6 +311,67 @@ class GcpHelpersTestCase(unittest.TestCase):
                 call("demo-project", "deny-cdn-egress-custom-001"),
             ],
         )
+
+    @patch("gcp_firewall.delete_managed_firewall_rules", return_value=True)
+    @patch("gcp_firewall.list_instances", return_value=[])
+    @patch("gcp_firewall.delete_disks_if_needed", return_value=False)
+    @patch("gcp_firewall.wait_for_operation")
+    @patch("gcp_firewall.delete_instance_with_retry", return_value=SimpleNamespace(name="delete-op"))
+    @patch("gcp_firewall.get_instance_with_retry")
+    @patch("gcp_firewall.instances_client", return_value=SimpleNamespace())
+    def test_delete_free_resources_reports_disk_cleanup_failure(
+        self,
+        _mock_instances_client,
+        mock_get_instance,
+        _mock_delete_instance,
+        _mock_wait_operation,
+        _mock_delete_disks,
+        _mock_list_instances,
+        _mock_delete_firewall_rules,
+    ):
+        instance_info = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_get_instance.return_value = SimpleNamespace(
+            disks=[SimpleNamespace(source="projects/demo/zones/us-west1-a/disks/vm-1")]
+        )
+
+        self.assertFalse(delete_free_resources("demo-project", instance_info, confirmed=True))
+
+    @patch("gcp_firewall.delete_managed_firewall_rules", return_value=False)
+    @patch("gcp_firewall.list_instances", return_value=[])
+    @patch("gcp_firewall.delete_disks_if_needed", return_value=True)
+    @patch("gcp_firewall.wait_for_operation")
+    @patch("gcp_firewall.delete_instance_with_retry", return_value=SimpleNamespace(name="delete-op"))
+    @patch("gcp_firewall.get_instance_with_retry", return_value=SimpleNamespace(disks=[]))
+    @patch("gcp_firewall.instances_client", return_value=SimpleNamespace())
+    def test_delete_free_resources_reports_firewall_cleanup_failure(
+        self,
+        _mock_instances_client,
+        _mock_get_instance,
+        _mock_delete_instance,
+        _mock_wait_operation,
+        _mock_delete_disks,
+        _mock_list_instances,
+        _mock_delete_firewall_rules,
+    ):
+        instance_info = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+
+        self.assertFalse(delete_free_resources("demo-project", instance_info, confirmed=True))
 
     def test_instance_cache_key_uses_project_zone_and_name(self):
         instance = InstanceInfo(
