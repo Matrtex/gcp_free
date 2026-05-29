@@ -9,6 +9,7 @@ from gcp import (
     build_remote_status_command,
     build_remote_upload_command,
     cleanup_temp_upload_file,
+    format_traffic_limit_gb,
     prepare_local_script_for_upload,
     render_local_script_content,
 )
@@ -54,6 +55,19 @@ class RemoteCommandTestCase(unittest.TestCase):
         content = render_local_script_content("net_shutdown", traffic_limit_gb=123)
         self.assertIn("LIMIT=123", content)
         self.assertNotIn("LIMIT=180", content)
+
+    def test_render_traffic_script_preserves_fractional_limit(self):
+        content = render_local_script_content("net_shutdown", traffic_limit_gb=123.5)
+        self.assertIn("LIMIT=123.5", content)
+        self.assertNotIn("LIMIT=123\n", content)
+
+    def test_format_traffic_limit_rejects_invalid_values(self):
+        with self.assertRaises(ValueError):
+            format_traffic_limit_gb("not-a-number")
+        with self.assertRaises(ValueError):
+            format_traffic_limit_gb(0)
+        with self.assertRaises(ValueError):
+            format_traffic_limit_gb(float("inf"))
 
     @patch("gcp_remote.get_local_script_path")
     def test_prepare_local_script_for_upload_normalizes_shell_line_endings(self, mock_get_local_script_path):

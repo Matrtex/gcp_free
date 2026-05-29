@@ -45,6 +45,7 @@ __all__ = [
     'pick_remote_method',
     'get_remote_config_for_instance',
     'get_local_script_path',
+    'format_traffic_limit_gb',
     'render_local_script_content',
     'prepare_local_script_for_upload',
     'cleanup_temp_upload_file',
@@ -136,6 +137,17 @@ def get_local_script_path(script_key: Any) -> Any:
         return None
     return local_path
 
+def format_traffic_limit_gb(traffic_limit_gb: Any) -> str:
+    try:
+        limit = float(traffic_limit_gb)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"流量监控限额必须是数字: {traffic_limit_gb}") from exc
+    if limit <= 0 or limit != limit or limit in (float("inf"), float("-inf")):
+        raise ValueError(f"流量监控限额必须是大于 0 的有限数字: {traffic_limit_gb}")
+    if limit.is_integer():
+        return str(int(limit))
+    return f"{limit:.6f}".rstrip("0").rstrip(".")
+
 def render_local_script_content(script_key: Any,  traffic_limit_gb: Any=TRAFFIC_LIMIT_GB) -> Any:
     local_script = get_local_script_path(script_key)
     if not local_script:
@@ -145,7 +157,7 @@ def render_local_script_content(script_key: Any,  traffic_limit_gb: Any=TRAFFIC_
         script_content = fh.read()
 
     if script_key in {"net_iptables", "net_shutdown"}:
-        script_content = script_content.replace("LIMIT=180", f"LIMIT={int(traffic_limit_gb)}")
+        script_content = script_content.replace("LIMIT=180", f"LIMIT={format_traffic_limit_gb(traffic_limit_gb)}")
     return script_content
 
 def prepare_local_script_for_upload(script_key: Any,  traffic_limit_gb: Any=TRAFFIC_LIMIT_GB) -> Any:
