@@ -303,8 +303,10 @@ class GcpHelpersTestCase(unittest.TestCase):
     @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
     @patch("gcp_firewall.insert_firewall_with_retry")
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=False)
+    @patch("gcp_firewall.firewalls_client", return_value=SimpleNamespace())
     def test_add_deny_cdn_egress_stops_when_old_rules_cannot_be_cleaned(
         self,
+        _mock_firewalls_client,
         mock_delete_deny_cdn,
         mock_insert_firewall,
         _mock_ensure_rebuild_safe,
