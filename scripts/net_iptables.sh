@@ -29,7 +29,7 @@ echo "--> 检测到当前主网卡为: $INTERFACE"
 # 3. 安装依赖工具
 echo "--> 正在更新软件源并安装工具..."
 apt-get update -y
-apt-get install vnstat bc -y
+apt-get install vnstat bc iptables -y
 
 # 4. 配置并启动 vnStat
 echo "--> 配置 vnStat..."
@@ -69,10 +69,17 @@ log() {
 apply_limit_rules() {
     local chain="\$LIMIT_CHAIN"
 
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo "错误：未找到 iptables，无法应用流量保护规则。"
+        log "错误：未找到 iptables，流量保护规则未生效。"
+        exit 1
+    fi
+
     iptables -N "\$chain" 2>/dev/null || true
     iptables -F "\$chain"
-    iptables -A "\$chain" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     iptables -A "\$chain" -o lo -j RETURN
+    # 超限后只保留 SSH 已建立连接的出站响应，避免其它长连接继续消耗流量。
+    iptables -A "\$chain" -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j RETURN
     iptables -A "\$chain" -j REJECT --reject-with icmp-port-unreachable
 
     while iptables -D OUTPUT -j "\$chain" 2>/dev/null; do
@@ -130,7 +137,7 @@ if [ \$(echo "\$TX_GB >= \$LIMIT" | bc) -eq 1 ]; then
     # 只在 OUTPUT 上挂接本工具专用链，避免清空用户已有的 Docker/ufw/系统防火墙规则。
     apply_limit_rules
     
-    log "网络已限制 (阻断新建出站连接，保留已建立连接和本地回环)。"
+    log "网络已限制 (阻断非 SSH 出站连接，仅保留本机回环和已建立 SSH 响应)。"
 else
     echo "状态: [正常] 流量未超限。"
     log "流量正常。"

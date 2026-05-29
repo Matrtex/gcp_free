@@ -45,6 +45,7 @@ __all__ = [
     'delete_firewall_rule',
     'delete_deny_cdn_egress',
     'delete_managed_firewall_rules',
+    'ensure_deny_cdn_rebuild_scope_safe',
     'delete_disks_if_needed',
     'delete_free_resources',
 ]
@@ -234,22 +235,47 @@ def fallback_deny_cdn_rule_names() -> Any:
         ],
     ]
 
-def list_firewall_rule_names(project_id: Any, firewall_client: Any) -> Any:
+def list_firewall_rules(project_id: Any, firewall_client: Any) -> Any:
     try:
         rules = firewall_client.list(
             project=project_id,
             timeout=RESOURCE_LIST_REQUEST_TIMEOUT,
         )
-        return sorted(str(rule.name) for rule in rules if getattr(rule, "name", None))
+        return sorted(
+            [rule for rule in rules if getattr(rule, "name", None)],
+            key=lambda rule: str(rule.name),
+        )
     except Exception as exc:
-        print_warning(f"列出防火墙规则失败，将使用兜底规则名清理: {summarize_exception(exc)}")
+        print_warning(f"列出防火墙规则失败: {summarize_exception(exc)}")
         return None
 
-def get_deny_cdn_rule_names_to_delete(project_id: Any, firewall_client: Any) -> Any:
-    rule_names = list_firewall_rule_names(project_id, firewall_client)
-    if rule_names is None:
+def list_firewall_rule_names(project_id: Any, firewall_client: Any) -> Any:
+    rules = list_firewall_rules(project_id, firewall_client)
+    if rules is None:
+        return None
+    return [str(rule.name) for rule in rules]
+
+def get_deny_cdn_rules(project_id: Any, firewall_client: Any) -> Any:
+    rules = list_firewall_rules(project_id, firewall_client)
+    if rules is None:
+        return None
+    return [rule for rule in rules if is_deny_cdn_egress_rule_name(getattr(rule, "name", ""))]
+
+def get_deny_cdn_rule_names_to_delete(project_id: Any, firewall_client: Any, network: Any = None) -> Any:
+    rules = get_deny_cdn_rules(project_id, firewall_client)
+    target_network = str(network or "").strip()
+    if rules is None:
+        if target_network:
+            print_warning("无法列出防火墙规则，不能安全按目标网络清理拒绝 CDN 出站规则。")
+            return None
         return fallback_deny_cdn_rule_names()
-    return [rule_name for rule_name in rule_names if is_deny_cdn_egress_rule_name(rule_name)]
+    if target_network:
+        return [
+            str(rule.name)
+            for rule in rules
+            if firewall_rule_network_matches(rule, target_network)
+        ]
+    return [str(rule.name) for rule in rules]
 
 def get_managed_firewall_rule_names_to_delete(project_id: Any, firewall_client: Any) -> Any:
     rule_names = list_firewall_rule_names(project_id, firewall_client)
@@ -262,6 +288,32 @@ def get_managed_firewall_rule_names_to_delete(project_id: Any, firewall_client: 
 
 def describe_managed_firewall_rules() -> Any:
     return f"{ALLOW_ALL_INGRESS_RULE_NAME}, {DENY_CDN_EGRESS_RULE_NAME} 及其拆分规则"
+
+def ensure_deny_cdn_rebuild_scope_safe(project_id: Any, firewall_client: Any, network: Any) -> Any:
+    rules = get_deny_cdn_rules(project_id, firewall_client)
+    if rules is None:
+        print_warning("无法确认现有拒绝 CDN 出站规则所属网络，已停止重建以避免误删其它网络规则。")
+        return False
+
+    foreign_rules = [
+        rule
+        for rule in rules
+        if not firewall_rule_network_matches(rule, network)
+    ]
+    if not foreign_rules:
+        return True
+
+    rule_summaries = ", ".join(
+        f"{getattr(rule, 'name', '-') or '-'}({getattr(rule, 'network', '-') or '-'})"
+        for rule in foreign_rules[:5]
+    )
+    if len(foreign_rules) > 5:
+        rule_summaries += f" 等 {len(foreign_rules)} 条"
+    print_warning(
+        "检测到同项目中已有其它网络的拒绝 CDN 出站规则，已停止重建以避免误删: "
+        f"{rule_summaries}。目标网络: {network}。请先手动确认或删除旧规则。"
+    )
+    return False
 
 def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
@@ -365,7 +417,10 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
         return True
 
     print_info("正在按当前 cdnip.txt 重建拒绝 CDN 出站规则。")
-    if not delete_deny_cdn_egress(project_id, allow_cdn_message=False):
+    firewall_client = firewalls_client()
+    if not ensure_deny_cdn_rebuild_scope_safe(project_id, firewall_client, network):
+        return False
+    if not delete_deny_cdn_egress(project_id, allow_cdn_message=False, network=network):
         print_warning("清理旧的拒绝 CDN 出站规则失败，已停止创建新规则。")
         return False
 
@@ -469,13 +524,15 @@ def delete_firewall_rule(project_id: Any,  rule_name: Any) -> Any:
         print_warning(f"删除防火墙规则失败: {rule_name} ({e})")
         return False
 
-def delete_deny_cdn_egress(project_id: Any, allow_cdn_message: Any=True) -> Any:
+def delete_deny_cdn_egress(project_id: Any, allow_cdn_message: Any=True, network: Any = None) -> Any:
     if allow_cdn_message:
         print_info("正在删除拒绝 CDN 出站规则，删除后将允许 CDN 访问。")
     else:
         print_info("正在清理旧的拒绝 CDN 出站规则。")
     firewall_client = firewalls_client()
-    rule_names = get_deny_cdn_rule_names_to_delete(project_id, firewall_client)
+    rule_names = get_deny_cdn_rule_names_to_delete(project_id, firewall_client, network=network)
+    if rule_names is None:
+        return False
     if not rule_names:
         print_info("未发现本工具添加的拒绝 CDN 出站规则。")
         return True

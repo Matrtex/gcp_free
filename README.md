@@ -202,7 +202,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 .\start.ps1 firewall --project-id <你的项目ID> --account <你的Google账号邮箱> --delete-managed-rules
 ```
 
-重复添加已存在的防火墙规则会视为成功并跳过；`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。添加规则默认从 `--instance` 读取网络，也可以显式传入 `--network default` 或 `--network global/networks/default`；删除规则不需要实例仍然存在。
+重复添加已存在且匹配当前网络和配置的防火墙规则会视为成功并跳过；如果同名规则属于其它网络或配置不一致，工具会停止并提示先删除旧规则。`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。添加规则默认从 `--instance` 读取网络，也可以显式传入 `--network default` 或 `--network global/networks/default`；删除规则不需要实例仍然存在。
 
 一键部署流程：
 

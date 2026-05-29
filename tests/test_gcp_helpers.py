@@ -249,6 +249,7 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertFalse(add_allow_all_ingress("demo-project", "global/networks/default"))
         mock_insert_firewall.assert_not_called()
 
+    @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
     @patch("gcp_firewall.wait_for_global_operation")
     @patch("gcp_firewall.insert_firewall_with_retry", return_value=SimpleNamespace(name="op-1"))
@@ -259,13 +260,18 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_insert_firewall,
         _mock_wait_operation,
         mock_delete_deny_cdn,
+        _mock_ensure_rebuild_safe,
     ):
         mock_firewalls_client.return_value = SimpleNamespace(get=Mock(side_effect=RuntimeError("404 not found")))
         ip_ranges = [f"10.0.{index // 256}.{index % 256}/32" for index in range(300)]
 
         self.assertTrue(add_deny_cdn_egress("demo-project", ip_ranges, "global/networks/default"))
 
-        mock_delete_deny_cdn.assert_called_once_with("demo-project", allow_cdn_message=False)
+        mock_delete_deny_cdn.assert_called_once_with(
+            "demo-project",
+            allow_cdn_message=False,
+            network="global/networks/default",
+        )
         created_rules = [call_args.args[2] for call_args in mock_insert_firewall.call_args_list]
         self.assertEqual([rule.name for rule in created_rules], [
             "deny-cdn-egress-custom-001",
@@ -274,37 +280,42 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(len(created_rules[0].destination_ranges), 256)
         self.assertEqual(len(created_rules[1].destination_ranges), 44)
 
-    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
     @patch("gcp_firewall.insert_firewall_with_retry")
     @patch("gcp_firewall.firewalls_client")
-    def test_add_deny_cdn_egress_rejects_existing_rule_on_other_network(
+    def test_add_deny_cdn_egress_rejects_rebuild_when_existing_rule_is_on_other_network(
         self,
         mock_firewalls_client,
         mock_insert_firewall,
-        _mock_delete_deny_cdn,
     ):
         incompatible_rule = SimpleNamespace(
+            name="deny-cdn-egress-custom",
             direction="EGRESS",
             network="https://www.googleapis.com/compute/v1/projects/demo/global/networks/other",
             priority=900,
             destination_ranges=["10.0.0.1/32"],
             denied=[SimpleNamespace(ip_protocol="all")],
         )
-        mock_firewalls_client.return_value = SimpleNamespace(get=Mock(return_value=incompatible_rule))
+        mock_firewalls_client.return_value = SimpleNamespace(list=Mock(return_value=[incompatible_rule]))
 
         self.assertFalse(add_deny_cdn_egress("demo-project", ["10.0.0.1/32"], "global/networks/default"))
         mock_insert_firewall.assert_not_called()
 
+    @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
     @patch("gcp_firewall.insert_firewall_with_retry")
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=False)
     def test_add_deny_cdn_egress_stops_when_old_rules_cannot_be_cleaned(
         self,
         mock_delete_deny_cdn,
         mock_insert_firewall,
+        _mock_ensure_rebuild_safe,
     ):
         self.assertFalse(add_deny_cdn_egress("demo-project", ["10.0.0.1/32"], "global/networks/default"))
 
-        mock_delete_deny_cdn.assert_called_once_with("demo-project", allow_cdn_message=False)
+        mock_delete_deny_cdn.assert_called_once_with(
+            "demo-project",
+            allow_cdn_message=False,
+            network="global/networks/default",
+        )
         mock_insert_firewall.assert_not_called()
 
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)

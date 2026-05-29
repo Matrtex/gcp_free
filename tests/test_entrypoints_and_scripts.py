@@ -66,8 +66,12 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
 
         self.assertIn("apply_limit_rules", limit_block)
         self.assertIn('LIMIT_CHAIN="GCP_FREE_LIMIT"', content)
+        self.assertIn("apt-get install vnstat bc iptables -y", content)
+        self.assertIn("command -v iptables", content)
+        self.assertIn('iptables -A "\\$chain" -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j RETURN', content)
         self.assertIn('iptables -A "\\$chain" -j REJECT --reject-with icmp-port-unreachable', content)
         self.assertIn('iptables -I OUTPUT 1 -j "\\$chain"', content)
+        self.assertNotIn("--ctstate ESTABLISHED,RELATED -j RETURN", content)
         self.assertNotIn("iptables -P INPUT DROP", limit_block)
         self.assertNotIn("iptables -P FORWARD DROP", limit_block)
         self.assertNotIn("iptables -P OUTPUT DROP", limit_block)
