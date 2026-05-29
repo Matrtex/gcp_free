@@ -117,6 +117,19 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
                 self.assertIn("set -euo pipefail", content)
                 self.assertIn("crontab -l > /tmp/cron_bk 2>/dev/null || true", content)
 
+    def test_traffic_scripts_fail_closed_when_vnstat_is_unreadable(self):
+        iptables_content = Path(ROOT_DIR, "scripts", "net_iptables.sh").read_text(encoding="utf-8")
+        shutdown_content = Path(ROOT_DIR, "scripts", "net_shutdown.sh").read_text(encoding="utf-8")
+
+        for content in (iptables_content, shutdown_content):
+            self.assertIn("无法读取有效 vnStat 出站流量", content)
+            self.assertIn('! "\\$TX_BYTES" =~ ^[0-9]+$', content)
+            self.assertNotIn("TX_BYTES=0", content)
+
+        self.assertIn("apply_limit_rules", iptables_content)
+        self.assertIn("保护性关机", shutdown_content)
+        self.assertIn("shutdown -h now", shutdown_content)
+
     def test_apt_script_contains_separate_debian_and_ubuntu_sources(self):
         content = Path(ROOT_DIR, "scripts", "apt.sh").read_text(encoding="utf-8")
 

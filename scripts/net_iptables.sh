@@ -94,9 +94,12 @@ VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null || true)
 # 提取出站流量 (TX)，第 10 个字段
 TX_BYTES=\$(echo "\$VNSTAT_RAW" | cut -d ';' -f 10)
 
-# 如果获取失败或为空，默认为 0
-if [[ -z "\$TX_BYTES" ]]; then
-    TX_BYTES=0
+# 读不到有效流量时按保护策略处理，避免统计失效后继续消耗免费额度。
+if [[ -z "\$VNSTAT_RAW" || -z "\$TX_BYTES" || ! "\$TX_BYTES" =~ ^[0-9]+$ ]]; then
+    echo "状态: [警告] 无法读取有效 vnStat 出站流量，正在应用保护性防火墙规则..."
+    log "警告：无法读取有效 vnStat 出站流量，已执行保护性封禁策略。"
+    apply_limit_rules
+    exit 1
 fi
 
 # 将字节转换为 GB (1 GB = 1073741824 Bytes)

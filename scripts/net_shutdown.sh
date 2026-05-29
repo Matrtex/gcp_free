@@ -49,6 +49,8 @@ echo "--> 生成监控脚本 /root/check_traffic.sh..."
 cat > /root/check_traffic.sh <<EOF
 #!/bin/bash
 
+set -euo pipefail
+
 # 强制使用标准区域设置
 export LC_ALL=C
 
@@ -70,14 +72,18 @@ if [ "\$(id -u)" -ne 0 ]; then
 fi
 
 # 获取流量数据 (强制使用 'b' 参数获取字节单位)
-VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null)
+VNSTAT_RAW=\$(vnstat -i "\$INTERFACE" --oneline b 2>/dev/null || true)
 
 # 提取当月出站流量 (TX)，第 10 个字段
 TX_BYTES=\$(echo "\$VNSTAT_RAW" | cut -d ';' -f 10)
 
-# 如果获取失败或为空，默认为 0
-if [[ -z "\$TX_BYTES" ]]; then
-    TX_BYTES=0
+# 读不到有效流量时直接保护性关机，避免统计失效后继续消耗免费额度。
+if [[ -z "\$VNSTAT_RAW" || -z "\$TX_BYTES" || ! "\$TX_BYTES" =~ ^[0-9]+$ ]]; then
+    echo "状态: [警告] 无法读取有效 vnStat 出站流量，正在保护性关机..."
+    log "警告：无法读取有效 vnStat 出站流量，执行保护性关机。"
+    sleep 1
+    shutdown -h now
+    exit 1
 fi
 
 # 将字节转换为 GB (1 GB = 1073741824 Bytes)

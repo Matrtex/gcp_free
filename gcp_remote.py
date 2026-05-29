@@ -157,7 +157,9 @@ def render_local_script_content(script_key: Any,  traffic_limit_gb: Any=TRAFFIC_
         script_content = fh.read()
 
     if script_key in {"net_iptables", "net_shutdown"}:
-        script_content = script_content.replace("LIMIT=180", f"LIMIT={format_traffic_limit_gb(traffic_limit_gb)}")
+        traffic_limit_text = format_traffic_limit_gb(traffic_limit_gb)
+        script_content = script_content.replace("LIMIT=180", f"LIMIT={traffic_limit_text}")
+        script_content = script_content.replace("流量 >= 180 GB", f"流量 >= {traffic_limit_text} GB")
     return script_content
 
 def prepare_local_script_for_upload(script_key: Any,  traffic_limit_gb: Any=TRAFFIC_LIMIT_GB) -> Any:

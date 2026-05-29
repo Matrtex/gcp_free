@@ -119,15 +119,83 @@ def is_already_exists_error(exc: Any, rule_name: Any = None) -> Any:
             return True
     return False
 
-def firewall_rule_exists(firewall_client: Any, project_id: Any, rule_name: Any) -> Any:
+def get_firewall_rule(firewall_client: Any, project_id: Any, rule_name: Any) -> Any:
     try:
-        firewall_client.get(project=project_id, firewall=rule_name, timeout=RESOURCE_READ_REQUEST_TIMEOUT)
-        return True
+        return firewall_client.get(project=project_id, firewall=rule_name, timeout=RESOURCE_READ_REQUEST_TIMEOUT)
     except Exception as exc:
         if is_not_found_error(exc):
-            return False
+            return None
         print_warning(f"检查防火墙规则 {rule_name} 是否存在失败，将继续尝试创建: {summarize_exception(exc)}")
+        return None
+
+def firewall_rule_exists(firewall_client: Any, project_id: Any, rule_name: Any) -> Any:
+    return get_firewall_rule(firewall_client, project_id, rule_name) is not None
+
+def get_network_name(network: Any) -> Any:
+    network_text = str(network or "").strip()
+    if not network_text:
+        return ""
+    marker = "/global/networks/"
+    if marker in network_text:
+        return network_text.rsplit(marker, 1)[1].strip("/")
+    marker = "global/networks/"
+    if network_text.startswith(marker):
+        return network_text[len(marker):].strip("/")
+    return network_text.strip("/")
+
+def normalize_firewall_ranges(ranges: Any) -> Any:
+    return sorted(str(item).strip() for item in (ranges or []) if str(item).strip())
+
+def get_protocol_value(config_object: Any) -> Any:
+    return (
+        getattr(config_object, "ip_protocol", None)
+        or getattr(config_object, "I_p_protocol", None)
+        or ""
+    )
+
+def firewall_rule_has_single_protocol_all(rule: Any, field_name: Any) -> Any:
+    configs = list(getattr(rule, field_name, None) or [])
+    if len(configs) != 1:
         return False
+    return str(get_protocol_value(configs[0])).lower() == "all"
+
+def firewall_rule_network_matches(rule: Any, network: Any) -> Any:
+    return get_network_name(getattr(rule, "network", "")) == get_network_name(network)
+
+def firewall_rule_priority_matches(rule: Any, expected_priority: Any) -> Any:
+    try:
+        return int(getattr(rule, "priority", -1)) == int(expected_priority)
+    except (TypeError, ValueError):
+        return False
+
+def is_allow_all_ingress_rule_compatible(rule: Any, network: Any) -> Any:
+    return (
+        str(getattr(rule, "direction", "")).upper() == "INGRESS"
+        and firewall_rule_network_matches(rule, network)
+        and firewall_rule_priority_matches(rule, 1000)
+        and normalize_firewall_ranges(getattr(rule, "source_ranges", None)) == ["0.0.0.0/0"]
+        and firewall_rule_has_single_protocol_all(rule, "allowed")
+    )
+
+def is_deny_cdn_egress_rule_compatible(rule: Any, network: Any, ip_ranges: Any) -> Any:
+    return (
+        str(getattr(rule, "direction", "")).upper() == "EGRESS"
+        and firewall_rule_network_matches(rule, network)
+        and firewall_rule_priority_matches(rule, 900)
+        and normalize_firewall_ranges(getattr(rule, "destination_ranges", None)) == normalize_firewall_ranges(ip_ranges)
+        and firewall_rule_has_single_protocol_all(rule, "denied")
+    )
+
+def handle_existing_firewall_rule(rule_name: Any, existing_rule: Any, network: Any, compatible: Any) -> Any:
+    if compatible:
+        print_success(f"防火墙规则已存在且匹配当前网络，已跳过重复创建: {rule_name}")
+        return True
+    print_warning(
+        f"防火墙规则 {rule_name} 已存在，但网络或配置与本次目标不一致。"
+        f"现有网络: {getattr(existing_rule, 'network', '-') or '-'}，"
+        f"目标网络: {network}。请先删除本工具添加的规则后重试。"
+    )
+    return False
 
 def chunk_ip_ranges(ip_ranges: Any, chunk_size: Any=FIREWALL_IP_RANGES_PER_RULE) -> Any:
     ranges = list(ip_ranges or [])
@@ -200,9 +268,14 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
     rule_name = ALLOW_ALL_INGRESS_RULE_NAME
 
     print_info(f"正在创建入站规则: {rule_name} ...")
-    if firewall_rule_exists(firewall_client, project_id, rule_name):
-        print_success(f"防火墙规则已存在，已跳过重复创建: {rule_name}")
-        return True
+    existing_rule = get_firewall_rule(firewall_client, project_id, rule_name)
+    if existing_rule is not None:
+        return handle_existing_firewall_rule(
+            rule_name,
+            existing_rule,
+            network,
+            is_allow_all_ingress_rule_compatible(existing_rule, network),
+        )
 
     firewall_rule = compute_v1.Firewall()
     firewall_rule.name = rule_name
@@ -223,8 +296,16 @@ def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
         return True
     except Exception as e:
         if is_already_exists_error(e, rule_name):
-            print_success(f"防火墙规则已存在，已跳过重复创建: {rule_name}")
-            return True
+            existing_rule = get_firewall_rule(firewall_client, project_id, rule_name)
+            if existing_rule is not None:
+                return handle_existing_firewall_rule(
+                    rule_name,
+                    existing_rule,
+                    network,
+                    is_allow_all_ingress_rule_compatible(existing_rule, network),
+                )
+            print_warning(f"防火墙规则 {rule_name} 已存在，但无法读取现有规则详情，已停止以避免误判。")
+            return False
         else:
             print_warning(f"创建防火墙规则失败: {summarize_exception(e)}")
             LOGGER.error(traceback.format_exc())
@@ -234,9 +315,14 @@ def add_single_deny_cdn_egress_rule(project_id: Any,  rule_name: Any,  ip_ranges
     firewall_client = firewalls_client()
 
     print_info(f"正在创建出站拒绝规则: {rule_name} ...")
-    if firewall_rule_exists(firewall_client, project_id, rule_name):
-        print_success(f"防火墙规则已存在，已跳过重复创建: {rule_name}")
-        return True
+    existing_rule = get_firewall_rule(firewall_client, project_id, rule_name)
+    if existing_rule is not None:
+        return handle_existing_firewall_rule(
+            rule_name,
+            existing_rule,
+            network,
+            is_deny_cdn_egress_rule_compatible(existing_rule, network, ip_ranges),
+        )
 
     firewall_rule = compute_v1.Firewall()
     firewall_rule.name = rule_name
@@ -257,8 +343,16 @@ def add_single_deny_cdn_egress_rule(project_id: Any,  rule_name: Any,  ip_ranges
         return True
     except Exception as e:
         if is_already_exists_error(e, rule_name):
-            print_success(f"防火墙规则已存在，已跳过重复创建: {rule_name}")
-            return True
+            existing_rule = get_firewall_rule(firewall_client, project_id, rule_name)
+            if existing_rule is not None:
+                return handle_existing_firewall_rule(
+                    rule_name,
+                    existing_rule,
+                    network,
+                    is_deny_cdn_egress_rule_compatible(existing_rule, network, ip_ranges),
+                )
+            print_warning(f"防火墙规则 {rule_name} 已存在，但无法读取现有规则详情，已停止以避免误判。")
+            return False
         else:
             print_warning(f"创建防火墙规则失败: {summarize_exception(e)}")
             LOGGER.error(traceback.format_exc())

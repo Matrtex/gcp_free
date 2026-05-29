@@ -61,6 +61,11 @@ class RemoteCommandTestCase(unittest.TestCase):
         self.assertIn("LIMIT=123.5", content)
         self.assertNotIn("LIMIT=123\n", content)
 
+    def test_render_traffic_script_updates_shutdown_summary_limit(self):
+        content = render_local_script_content("net_shutdown", traffic_limit_gb=123.5)
+        self.assertIn("流量 >= 123.5 GB", content)
+        self.assertNotIn("流量 >= 180 GB", content)
+
     def test_format_traffic_limit_rejects_invalid_values(self):
         with self.assertRaises(ValueError):
             format_traffic_limit_gb("not-a-number")
