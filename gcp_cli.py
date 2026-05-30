@@ -9,11 +9,12 @@ from gcp_common import (
     REGION_OPTIONS,
     RemoteConfig,
     argparse,
+    DEFAULT_GCP_IP_RANGES_FILE,
     find_gcloud_command,
     getpass,
     os,
     shutil,
-    update_cdnip_file,
+    update_gcp_ip_ranges_file,
 )
 from gcp_firewall import (
     configure_firewall_non_interactive,
@@ -91,6 +92,7 @@ __all__ = [
     'handle_delete_resources_cli',
     'handle_doctor_cli',
     'handle_show_reroll_state_cli',
+    'handle_update_gcp_ip_ranges_cli',
     'handle_update_cdnip_cli',
     'handle_status_cli',
     'run_setup_remote_step',
@@ -101,6 +103,8 @@ __all__ = [
     'ACTION_SPECS',
     'ACTION_SPEC_MAP',
 ]
+
+DEBIAN_ONLY_SETUP_TRAFFIC_SCRIPTS = {"net_iptables", "net_shutdown"}
 
 def build_remote_config_from_args(args: Any) -> Any:
     has_gcloud = find_gcloud_command() is not None
@@ -362,8 +366,12 @@ def handle_show_reroll_state_cli(args: Namespace) -> None:
         raise RuntimeError("未找到可显示的刷 CPU 状态。")
 
 def handle_update_cdnip_cli(args: Namespace) -> None:
-    merged_ranges = update_cdnip_file(output_path=args.output)
-    print_success(f"已更新 CDN IP 文件: {args.output}，共 {len(merged_ranges)} 个网段。")
+    print_warning("update-cdnip 是兼容别名；当前更新的是 GCP 区域 IP 段文件，不会默认覆盖 cdnip.txt。")
+    handle_update_gcp_ip_ranges_cli(args)
+
+def handle_update_gcp_ip_ranges_cli(args: Namespace) -> None:
+    merged_ranges = update_gcp_ip_ranges_file(output_path=args.output)
+    print_success(f"已更新 GCP 区域 IP 段文件: {args.output}，共 {len(merged_ranges)} 个网段。")
 
 def handle_status_cli(args: Namespace) -> None:
     remote_instance, remote_config = prepare_cli_remote_instance(args)
@@ -387,9 +395,20 @@ def run_setup_remote_step(args: Namespace,  instance_info: InstanceInfo,  remote
         raise RuntimeError(f"setup 步骤失败: {step_name}")
     return remote_instance
 
+def validate_setup_options(os_config: Any, traffic_script: Any) -> None:
+    if traffic_script not in DEBIAN_ONLY_SETUP_TRAFFIC_SCRIPTS:
+        return
+    if str(os_config.get("family", "")).startswith("debian"):
+        return
+    raise ValueError(
+        f"setup 当前选择的流量监控脚本 {traffic_script} 仅适配 Debian。"
+        "请改用 --os debian-12，或先单独创建 Ubuntu 实例后不要安装该流量监控脚本。"
+    )
+
 def handle_setup_cli(args: Namespace) -> None:
     zone = resolve_zone_for_create(args.zone, args.region, getattr(args, "tier", None))
     os_config = resolve_os_config(args.os)
+    validate_setup_options(os_config, args.traffic_script)
     instance_name = args.instance_name
 
     if args.dry_run:
@@ -712,11 +731,26 @@ def build_arg_parser() -> Any:
     doctor_parser.add_argument("--project-id", help="可选，检查默认项目时显示上下文")
     doctor_parser.set_defaults(handler=ACTION_SPEC_MAP["doctor"].cli_handler)
 
+    update_gcp_ip_ranges_parser = subparsers.add_parser(
+        "update-gcp-ip-ranges",
+        help="更新 GCP 区域 IP 段文件",
+    )
+    update_gcp_ip_ranges_parser.add_argument(
+        "--output",
+        default=DEFAULT_GCP_IP_RANGES_FILE,
+        help=f"输出文件路径，默认 {DEFAULT_GCP_IP_RANGES_FILE}",
+    )
+    update_gcp_ip_ranges_parser.set_defaults(handler=handle_update_gcp_ip_ranges_cli)
+
     update_cdnip_parser = subparsers.add_parser(
         "update-cdnip",
-        help="更新 cdnip.txt 中的 GCP 区域 IP 段",
+        help="兼容别名：更新 GCP 区域 IP 段文件",
     )
-    update_cdnip_parser.add_argument("--output", default="cdnip.txt", help="输出文件路径，默认 cdnip.txt")
+    update_cdnip_parser.add_argument(
+        "--output",
+        default=DEFAULT_GCP_IP_RANGES_FILE,
+        help=f"输出文件路径，默认 {DEFAULT_GCP_IP_RANGES_FILE}；如需覆盖 cdnip.txt 必须显式指定",
+    )
     update_cdnip_parser.set_defaults(handler=handle_update_cdnip_cli)
 
     return parser
@@ -732,6 +766,7 @@ def run_cli(args: Any) -> Any:
     no_library_handlers = {
         handle_doctor_cli,
         handle_show_reroll_state_cli,
+        handle_update_gcp_ip_ranges_cli,
         handle_update_cdnip_cli,
         handle_login_account_cli,
         handle_switch_account_cli,

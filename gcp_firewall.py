@@ -456,7 +456,7 @@ def configure_firewall(project_id: Any,  network: Any) -> Any:
             if ips:
                 add_deny_cdn_egress(project_id, ips, network)
         elif choice == "3":
-            delete_deny_cdn_egress(project_id)
+            delete_deny_cdn_egress(project_id, network=network)
         elif choice == "4":
             confirm = input("请输入 DELETE 确认删除本工具添加的全部防火墙规则: ").strip()
             if confirm == "DELETE":
@@ -488,7 +488,7 @@ def configure_firewall_non_interactive(
     if delete_managed_rules:
         all_ok = delete_managed_firewall_rules(project_id) and all_ok
     elif delete_deny_cdn:
-        all_ok = delete_deny_cdn_egress(project_id) and all_ok
+        all_ok = delete_deny_cdn_egress(project_id, network=network) and all_ok
 
     if allow_all_ingress:
         all_ok = add_allow_all_ingress(project_id, network) and all_ok

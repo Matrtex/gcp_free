@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 GCP_IP_RANGES_URL = "https://www.gstatic.com/ipranges/cloud.json"
 DEFAULT_TARGET_REGIONS = ("us-west1", "us-central1", "us-east1")
+DEFAULT_GCP_IP_RANGES_FILE = "gcp_region_ips.txt"
 
 
 def fetch_gcp_ip_ranges(url: str = GCP_IP_RANGES_URL, timeout: int = 20) -> dict[str, Any]:
@@ -37,8 +38,8 @@ def get_gcp_ips_merged(
     return merge_gcp_ipv4_ranges(data, target_regions=target_regions)
 
 
-def update_cdnip_file(
-    output_path: str = "cdnip.txt",
+def update_gcp_ip_ranges_file(
+    output_path: str = DEFAULT_GCP_IP_RANGES_FILE,
     target_regions: Sequence[str] = DEFAULT_TARGET_REGIONS,
 ) -> list[str]:
     merged_ranges = get_gcp_ips_merged(target_regions=target_regions)
@@ -46,6 +47,13 @@ def update_cdnip_file(
         fh.write("\n".join(merged_ranges))
         fh.write("\n")
     return merged_ranges
+
+
+def update_cdnip_file(
+    output_path: str = DEFAULT_GCP_IP_RANGES_FILE,
+    target_regions: Sequence[str] = DEFAULT_TARGET_REGIONS,
+) -> list[str]:
+    return update_gcp_ip_ranges_file(output_path=output_path, target_regions=target_regions)
 
 
 def main() -> None:

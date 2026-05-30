@@ -26,6 +26,7 @@ from gcp import (
     get_soft_exception_count,
     LOGIN_NEW_ACCOUNT_MARKER,
     handle_setup_cli,
+    handle_update_gcp_ip_ranges_cli,
     handle_login_account_cli,
     handle_switch_account_cli,
     handle_firewall_cli,
@@ -328,7 +329,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             delete_deny_cdn=True,
         )
 
-        mock_delete_deny.assert_called_once_with("demo-project")
+        mock_delete_deny.assert_called_once_with("demo-project", network="global/networks/default")
 
     @patch("gcp_firewall.firewalls_client")
     @patch("gcp_firewall.delete_firewall_rule", return_value=True)
@@ -351,6 +352,26 @@ class GcpHelpersTestCase(unittest.TestCase):
                 call("demo-project", "deny-cdn-egress-custom-001"),
             ],
         )
+
+    @patch("gcp_firewall.firewalls_client")
+    @patch("gcp_firewall.delete_firewall_rule", return_value=True)
+    def test_delete_deny_cdn_egress_filters_by_target_network(self, mock_delete_rule, mock_firewalls_client):
+        mock_firewalls_client.return_value = SimpleNamespace(
+            list=lambda **_kwargs: [
+                SimpleNamespace(
+                    name="deny-cdn-egress-custom",
+                    network="https://www.googleapis.com/compute/v1/projects/demo/global/networks/default",
+                ),
+                SimpleNamespace(
+                    name="deny-cdn-egress-custom-001",
+                    network="https://www.googleapis.com/compute/v1/projects/demo/global/networks/other",
+                ),
+            ]
+        )
+
+        self.assertTrue(delete_deny_cdn_egress("demo-project", network="global/networks/default"))
+
+        mock_delete_rule.assert_called_once_with("demo-project", "deny-cdn-egress-custom")
 
     @patch("gcp_firewall.firewalls_client")
     @patch("gcp_firewall.delete_firewall_rule", return_value=True)
@@ -925,6 +946,14 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertIsNone(deny_args.instance)
         self.assertTrue(managed_args.delete_managed_rules)
 
+    def test_update_gcp_ip_ranges_cli_commands_parse(self):
+        gcp_range_args = parse_args(["update-gcp-ip-ranges"])
+        legacy_args = parse_args(["update-cdnip"])
+
+        self.assertIs(gcp_range_args.handler, handle_update_gcp_ip_ranges_cli)
+        self.assertEqual(gcp_range_args.output, "gcp_region_ips.txt")
+        self.assertEqual(legacy_args.output, "gcp_region_ips.txt")
+
     @patch("gcp_cli.configure_firewall_non_interactive")
     @patch("gcp_cli.get_cli_instance")
     def test_firewall_cli_delete_does_not_require_instance_lookup(
@@ -1474,6 +1503,24 @@ class GcpHelpersTestCase(unittest.TestCase):
         handle_setup_cli(args)
 
         mock_reroll_cpu_loop.assert_called_once()
+
+    @patch("gcp_cli.create_instance")
+    def test_handle_setup_cli_rejects_ubuntu_before_creating_resources(self, mock_create_instance):
+        args = SimpleNamespace(
+            project_id="demo-project",
+            zone="us-west1-a",
+            region="us-west1",
+            os="ubuntu",
+            instance_name="vm-1",
+            skip_reroll=True,
+            traffic_script="net_iptables",
+            dry_run=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "仅适配 Debian"):
+            handle_setup_cli(args)
+
+        mock_create_instance.assert_not_called()
 
     @patch("gcp_utils.print_warning")
     @patch("gcp_utils.time.time", side_effect=[65, 65])

@@ -203,6 +203,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 ```
 
 重复添加已存在且匹配当前网络和配置的防火墙规则会视为成功并跳过；如果同名规则属于其它网络或配置不一致，工具会停止并提示先删除旧规则。`--delete-deny-cdn-egress` 只删除拒绝 CDN 出站规则，也就是恢复允许 CDN IP 访问。添加规则默认从 `--instance` 读取网络，也可以显式传入 `--network default` 或 `--network global/networks/default`；删除规则不需要实例仍然存在。
+为避免误删其它 VPC 的规则，`--delete-deny-cdn-egress` 会按目标网络删除；未提供 `--instance` 或 `--network` 时默认只处理 `global/networks/default`。如果要删除本工具添加的全部防火墙规则，请使用 `--delete-managed-rules`。
 
 一键部署流程：
 
@@ -224,6 +225,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 ```
 
 `setup` 会串联创建实例、刷 AMD/EPYC、防火墙、换源、安装 dae、上传 `config.dae` 和安装流量监控脚本。默认流量监控限额来自 `gcp_config.py` 的 `TRAFFIC_LIMIT_GB`。
+`setup` 默认安装的流量监控脚本仅适配 Debian；选择 `--os ubuntu` 时会在创建实例前停止，避免创建完资源后远程安装失败。
 
 > **注意**：`--zone` 是最权威的参数，传了 zone 时 `--region` 和 `--tier` 会被忽略。未传 zone 时，默认使用免费区域 `us-west1`；指定 `--tier paid` 时会自动切换到付费区域。
 
@@ -235,12 +237,14 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 状态命令会读取远端 `vnstat` 当月流量、`dae` 服务状态、根分区磁盘使用率和系统运行时长；如果组件未安装，只显示警告，不自动安装。
 
-更新 `cdnip.txt`：
+更新 GCP 免费区域 IP 段文件：
 
 ```powershell
-.\start.ps1 update-cdnip
-.\start.ps1 update-cdnip --output cdnip.txt
+.\start.ps1 update-gcp-ip-ranges
+.\start.ps1 update-gcp-ip-ranges --output gcp_region_ips.txt
 ```
+
+`update-cdnip` 仅作为旧命令兼容别名保留，默认输出同样是 `gcp_region_ips.txt`，不会覆盖用于防火墙拒绝 CDN 出站的 `cdnip.txt`。如确实要覆盖某个文件，请显式传入 `--output`。
 
 日志文件默认写入：
 
@@ -272,7 +276,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## GitHub Actions
 
-仓库现在包含五条 GitHub Actions：
+仓库现在包含六条 GitHub Actions：
 
 - `自动检查`
   在 `push` 到 `master` 和 `pull_request` 时自动执行语法检查与单元测试。

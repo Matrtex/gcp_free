@@ -4,7 +4,12 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
 
-from gcp_ips import merge_gcp_ipv4_ranges, update_cdnip_file
+from gcp_ips import (
+    DEFAULT_GCP_IP_RANGES_FILE,
+    merge_gcp_ipv4_ranges,
+    update_cdnip_file,
+    update_gcp_ip_ranges_file,
+)
 
 
 class FakeUrlopenResponse:
@@ -35,7 +40,7 @@ class GcpIpsTestCase(unittest.TestCase):
         self.assertEqual(merge_gcp_ipv4_ranges(data), ["10.0.0.0/24"])
 
     @patch("gcp_ips.urllib.request.urlopen")
-    def test_update_cdnip_file_uses_standard_library_fetch(self, mock_urlopen):
+    def test_update_gcp_ip_ranges_file_uses_standard_library_fetch(self, mock_urlopen):
         mock_urlopen.return_value = FakeUrlopenResponse(
             {
                 "prefixes": [
@@ -45,12 +50,16 @@ class GcpIpsTestCase(unittest.TestCase):
             }
         )
         with TemporaryDirectory() as tmp_dir:
-            output_path = Path(tmp_dir, "cdnip.txt")
-            ranges = update_cdnip_file(output_path=str(output_path))
+            output_path = Path(tmp_dir, "gcp_region_ips.txt")
+            ranges = update_gcp_ip_ranges_file(output_path=str(output_path))
             content = output_path.read_text(encoding="utf-8")
 
         self.assertEqual(ranges, ["10.0.0.0/23"])
         self.assertEqual(content, "10.0.0.0/23\n")
+
+    def test_default_output_does_not_target_cdnip(self):
+        self.assertEqual(DEFAULT_GCP_IP_RANGES_FILE, "gcp_region_ips.txt")
+        self.assertNotEqual(update_cdnip_file.__defaults__[0], "cdnip.txt")
 
 
 if __name__ == "__main__":
