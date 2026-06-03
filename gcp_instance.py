@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from gcp_common import (
     Any,
     CPU_PLATFORM_POLL_INTERVAL,
@@ -21,6 +23,7 @@ from gcp_common import (
     images_client,
     instances_client,
     json,
+    os,
     projects_client,
     resourcemanager_v3,
     subprocess,
@@ -260,6 +263,90 @@ def set_gcloud_project(project_id: Any) -> Any:
     print_info(f"已设置 gcloud 默认项目: {target_project}")
     return True
 
+def get_current_gcloud_project() -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return ""
+
+    result = subprocess.run(
+        [gcloud_command, "config", "get-value", "project"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        print_warning(f"读取 gcloud 默认项目失败: {stderr_summary}")
+        return ""
+
+    current_project = str(result.stdout or "").strip()
+    if current_project == "(unset)":
+        return ""
+    return current_project
+
+def get_gcloud_config_dir() -> Path:
+    config_override = str(os.environ.get("CLOUDSDK_CONFIG", "") or "").strip()
+    if config_override:
+        return Path(config_override)
+    if os.name == "nt":
+        appdata = str(os.environ.get("APPDATA", "") or "").strip()
+        if appdata:
+            return Path(appdata) / "gcloud"
+    return Path.home() / ".config" / "gcloud"
+
+def get_adc_credentials_path() -> Path:
+    return get_gcloud_config_dir() / "application_default_credentials.json"
+
+def load_adc_credentials_data() -> tuple[Path, Any]:
+    adc_credentials_path = get_adc_credentials_path()
+    if not adc_credentials_path.is_file():
+        return adc_credentials_path, None
+    try:
+        data = json.loads(adc_credentials_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print_warning(f"读取 ADC 凭据文件失败: {adc_credentials_path} ({exc})")
+        return adc_credentials_path, None
+    if not isinstance(data, dict):
+        print_warning(f"ADC 凭据文件格式异常: {adc_credentials_path}")
+        return adc_credentials_path, None
+    return adc_credentials_path, data
+
+def get_current_adc_quota_project() -> Any:
+    _adc_credentials_path, data = load_adc_credentials_data()
+    if not data:
+        return ""
+    return str(data.get("quota_project_id") or "").strip()
+
+def restore_gcloud_project(project_id: Any) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return False
+
+    target_project = str(project_id or "").strip()
+    if target_project:
+        command = [gcloud_command, "config", "set", "project", target_project]
+    else:
+        command = [gcloud_command, "config", "unset", "project"]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        print_warning(f"恢复 gcloud 默认项目失败: {stderr_summary}")
+        return False
+
+    if target_project:
+        print_info(f"已恢复 gcloud 默认项目: {target_project}")
+    else:
+        print_info("已恢复 gcloud 默认项目为空。")
+    return True
+
 def set_adc_quota_project(project_id: Any) -> Any:
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
@@ -280,6 +367,42 @@ def set_adc_quota_project(project_id: Any) -> Any:
         print_warning(f"设置 ADC quota project 失败，后续 API 仍会继续尝试: {stderr_summary}")
         return False
     print_info(f"已设置 ADC quota project: {target_project}")
+    return True
+
+def restore_adc_quota_project(project_id: Any) -> Any:
+    adc_credentials_path, data = load_adc_credentials_data()
+    target_project = str(project_id or "").strip()
+    if data is None:
+        if target_project:
+            print_warning(
+                f"无法恢复 ADC quota project 为 {target_project}，"
+                f"未找到可编辑的凭据文件: {adc_credentials_path}"
+            )
+            return False
+        return True
+
+    current_project = str(data.get("quota_project_id") or "").strip()
+    if current_project == target_project:
+        return True
+
+    if target_project:
+        data["quota_project_id"] = target_project
+    else:
+        data.pop("quota_project_id", None)
+
+    try:
+        adc_credentials_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print_warning(f"恢复 ADC quota project 失败: {adc_credentials_path} ({exc})")
+        return False
+
+    if target_project:
+        print_info(f"已恢复 ADC quota project: {target_project}")
+    else:
+        print_info("已恢复 ADC quota project 为空。")
     return True
 
 def apply_selected_project(project_id: Any, account: Any = None) -> Any:

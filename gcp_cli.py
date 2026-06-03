@@ -23,13 +23,17 @@ from gcp_firewall import (
 from gcp_instance import (
     build_setup_dry_run_instance,
     create_instance,
+    get_current_adc_quota_project,
     find_instance_by_name,
     get_current_adc_account,
     get_current_gcloud_account,
+    get_current_gcloud_project,
     login_gcloud_account,
     list_instances,
     prepare_gcloud_context,
     print_instance_list,
+    restore_adc_quota_project,
+    restore_gcloud_project,
     switch_gcloud_account,
 )
 from gcp_menu import (
@@ -186,6 +190,23 @@ def prepare_cli_account_context(args: Any) -> Any:
         sync_adc=bool(account),
         no_browser=bool(getattr(args, "auth_no_browser", False)),
     )
+
+def snapshot_cli_project_context(args: Any) -> Any:
+    if getattr(args, "dry_run", False):
+        return None
+    project_id = str(getattr(args, "project_id", None) or "").strip()
+    if not project_id:
+        return None
+    return {
+        "gcloud_project": get_current_gcloud_project(),
+        "adc_quota_project": get_current_adc_quota_project(),
+    }
+
+def restore_cli_project_context(snapshot: Any) -> None:
+    if not snapshot:
+        return
+    restore_gcloud_project(snapshot.get("gcloud_project"))
+    restore_adc_quota_project(snapshot.get("adc_quota_project"))
 
 def get_cli_instance(args: Any) -> Any:
     if getattr(args, "dry_run", False) and getattr(args, "instance", None) and getattr(args, "zone", None):
@@ -771,9 +792,17 @@ def run_cli(args: Any) -> Any:
         handle_login_account_cli,
         handle_switch_account_cli,
     }
-    if handler not in no_library_handlers:
-        prepare_cli_account_context(args)
-    if handler not in no_library_handlers and not getattr(args, "dry_run", False):
-        ensure_libraries_or_exit()
-    handler(args)
-    return True
+    needs_preflight = handler not in no_library_handlers
+    context_snapshot = snapshot_cli_project_context(args) if needs_preflight else None
+    completed = False
+    try:
+        if needs_preflight:
+            prepare_cli_account_context(args)
+        if needs_preflight and not getattr(args, "dry_run", False):
+            ensure_libraries_or_exit()
+        handler(args)
+        completed = True
+        return True
+    finally:
+        if needs_preflight and not completed:
+            restore_cli_project_context(context_snapshot)

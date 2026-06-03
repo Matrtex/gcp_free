@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gcp_doctor import _run_command, find_gcloud_command, find_python_command, run_doctor
+from gcp_doctor import _run_command, find_gcloud_command, find_python_command, is_directory_writable, run_doctor
 
 
 class DoctorTestCase(unittest.TestCase):
@@ -188,6 +188,14 @@ class DoctorTestCase(unittest.TestCase):
         self.assertEqual(status_map["config.dae"], "WARN")
         self.assertEqual(status_map["log-dir"], "PASS")
         self.assertEqual(status_map["state-dir"], "PASS")
+
+    @patch("gcp_doctor.Path.mkdir", side_effect=PermissionError("denied"))
+    def test_is_directory_writable_returns_fail_when_mkdir_is_denied(self, _mock_mkdir):
+        ok, message = is_directory_writable(Path("D:/denied"))
+
+        self.assertFalse(ok)
+        self.assertIn("目录不可写", message)
+        self.assertIn("denied", message)
 
     @patch("gcp_doctor.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["gcloud"], timeout=5))
     def test_run_command_returns_error_when_subprocess_times_out(self, _mock_run):

@@ -3,8 +3,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+import zipfile
 
+import scripts.build_exe as build_exe
 from scripts.build_exe import validate_package_component
 
 
@@ -236,6 +239,53 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
             validate_package_component("../release", "version")
         with self.assertRaises(ValueError):
             validate_package_component("v1\nEVIL=1", "version")
+
+    @unittest.mock.patch("scripts.build_exe.subprocess.run")
+    def test_build_pyinstaller_exe_accepts_onedir_output_directory(self, mock_run):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root_dir = Path(tmp_dir)
+            build_dir = root_dir / "build" / "pyinstaller"
+            dist_dir = root_dir / "dist"
+            pyinstaller_dist_dir = dist_dir / "pyinstaller"
+            output_dir = pyinstaller_dist_dir / "demo"
+            output_dir.mkdir(parents=True)
+            (output_dir / "demo.exe").write_text("binary", encoding="utf-8")
+
+            with (
+                unittest.mock.patch.object(build_exe, "ROOT_DIR", root_dir),
+                unittest.mock.patch.object(build_exe, "BUILD_DIR", build_dir),
+                unittest.mock.patch.object(build_exe, "DIST_DIR", dist_dir),
+                unittest.mock.patch.object(build_exe, "PYINSTALLER_DIST_DIR", pyinstaller_dist_dir),
+                unittest.mock.patch.object(build_exe, "PACKAGE_FILES", []),
+                unittest.mock.patch.object(build_exe, "PACKAGE_DIRS", []),
+            ):
+                build_output = build_exe.build_pyinstaller_exe("demo", onefile=False)
+
+        self.assertEqual(build_output, output_dir)
+        mock_run.assert_called_once()
+
+    def test_make_release_package_copies_onedir_contents(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root_dir = Path(tmp_dir)
+            build_output = root_dir / "dist" / "pyinstaller" / "demo"
+            build_output.mkdir(parents=True)
+            (build_output / "demo.exe").write_text("binary", encoding="utf-8")
+            (build_output / "python312.dll").write_text("dll", encoding="utf-8")
+            release_dir = root_dir / "dist" / "release"
+
+            with (
+                unittest.mock.patch.object(build_exe, "RELEASE_DIR", release_dir),
+                unittest.mock.patch.object(build_exe, "copy_release_assets"),
+                unittest.mock.patch.object(build_exe, "write_build_info"),
+            ):
+                package_dir, zip_path = build_exe.make_release_package(build_output, "v1.2.3", "demo")
+
+            self.assertTrue((package_dir / "demo.exe").is_file())
+            self.assertTrue((package_dir / "python312.dll").is_file())
+            self.assertFalse((package_dir / "demo" / "demo.exe").exists())
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertIn("demo.exe", archive.namelist())
+                self.assertIn("python312.dll", archive.namelist())
 
     def test_dae_script_parses_arguments_before_default_install(self):
         content = Path(ROOT_DIR, "scripts", "dae.sh").read_text(encoding="utf-8")

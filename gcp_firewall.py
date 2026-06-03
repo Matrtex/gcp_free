@@ -277,6 +277,23 @@ def get_deny_cdn_rule_names_to_delete(project_id: Any, firewall_client: Any, net
         ]
     return [str(rule.name) for rule in rules]
 
+def get_deny_cdn_rule_restore_specs(project_id: Any, firewall_client: Any, network: Any = None) -> Any:
+    rules = get_deny_cdn_rules(project_id, firewall_client)
+    target_network = str(network or "").strip()
+    if rules is None:
+        return None
+    restore_specs = []
+    for rule in rules:
+        if target_network and not firewall_rule_network_matches(rule, target_network):
+            continue
+        restore_specs.append(
+            (
+                str(getattr(rule, "name", "") or ""),
+                list(getattr(rule, "destination_ranges", None) or []),
+            )
+        )
+    return sorted(restore_specs, key=lambda item: item[0])
+
 def get_managed_firewall_rule_names_to_delete(project_id: Any, firewall_client: Any) -> Any:
     rule_names = list_firewall_rule_names(project_id, firewall_client)
     if rule_names is None:
@@ -314,6 +331,23 @@ def ensure_deny_cdn_rebuild_scope_safe(project_id: Any, firewall_client: Any, ne
         f"{rule_summaries}。目标网络: {network}。请先手动确认或删除旧规则。"
     )
     return False
+
+def restore_deny_cdn_egress_rules(project_id: Any, rule_specs: Any, network: Any) -> Any:
+    if not rule_specs:
+        return True
+    print_info("正在恢复旧的拒绝 CDN 出站规则。")
+    all_ok = True
+    for rule_name, rule_ip_ranges in rule_specs:
+        all_ok = add_single_deny_cdn_egress_rule(project_id, rule_name, rule_ip_ranges, network) and all_ok
+    return all_ok
+
+def rollback_deny_cdn_rebuild(project_id: Any, network: Any, applied_rule_specs: Any, previous_rule_specs: Any) -> Any:
+    print_warning("创建新规则失败，正在回滚到旧的拒绝 CDN 出站规则。")
+    cleanup_ok = True
+    for rule_name, _rule_ip_ranges in reversed(list(applied_rule_specs or [])):
+        cleanup_ok = delete_firewall_rule(project_id, rule_name) and cleanup_ok
+    restore_ok = restore_deny_cdn_egress_rules(project_id, previous_rule_specs, network)
+    return cleanup_ok and restore_ok
 
 def add_allow_all_ingress(project_id: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
@@ -420,8 +454,22 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
     firewall_client = firewalls_client()
     if not ensure_deny_cdn_rebuild_scope_safe(project_id, firewall_client, network):
         return False
-    if not delete_deny_cdn_egress(project_id, allow_cdn_message=False, network=network):
-        print_warning("清理旧的拒绝 CDN 出站规则失败，已停止创建新规则。")
+    existing_rule_specs = get_deny_cdn_rule_restore_specs(project_id, firewall_client, network)
+    if existing_rule_specs is None:
+        print_warning("无法读取旧的拒绝 CDN 出站规则详情，已停止重建。")
+        return False
+
+    deleted_rule_specs = []
+    if existing_rule_specs:
+        print_info("正在清理旧的拒绝 CDN 出站规则。")
+    for old_rule_name, old_ip_ranges in existing_rule_specs:
+        if delete_firewall_rule(project_id, old_rule_name):
+            deleted_rule_specs.append((old_rule_name, old_ip_ranges))
+            continue
+        print_warning("清理旧的拒绝 CDN 出站规则失败，正在恢复已删除规则。")
+        restore_ok = restore_deny_cdn_egress_rules(project_id, deleted_rule_specs, network)
+        if not restore_ok:
+            print_warning("旧规则恢复未完全成功，请手动检查控制台。")
         return False
 
     if len(rule_specs) > 1:
@@ -431,10 +479,16 @@ def add_deny_cdn_egress(project_id: Any,  ip_ranges: Any,  network: Any) -> Any:
             f"({FIREWALL_IP_RANGES_PER_RULE})，将拆分为 {len(rule_specs)} 条规则。"
         )
 
-    all_ok = True
+    applied_rule_specs = []
     for rule_name, rule_ip_ranges in rule_specs:
-        all_ok = add_single_deny_cdn_egress_rule(project_id, rule_name, rule_ip_ranges, network) and all_ok
-    return all_ok
+        if add_single_deny_cdn_egress_rule(project_id, rule_name, rule_ip_ranges, network):
+            applied_rule_specs.append((rule_name, rule_ip_ranges))
+            continue
+        rollback_ok = rollback_deny_cdn_rebuild(project_id, network, applied_rule_specs, existing_rule_specs)
+        if not rollback_ok:
+            print_warning("拒绝 CDN 出站规则回滚未完全成功，请手动检查控制台。")
+        return False
+    return True
 
 def configure_firewall(project_id: Any,  network: Any) -> Any:
     print_info("防火墙规则管理菜单")

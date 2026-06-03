@@ -115,9 +115,9 @@ def get_adc_account_email(gcloud_path: str, timeout: int = 30) -> Tuple[str, str
 
 def is_directory_writable(path: Path | str) -> Tuple[bool, str]:
     target_dir = Path(path)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    temp_file = target_dir / ".doctor_write_test"
     try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = target_dir / ".doctor_write_test"
         temp_file.write_text("ok", encoding="utf-8")
         temp_file.unlink(missing_ok=True)
         return True, f"目录可写: {target_dir}"

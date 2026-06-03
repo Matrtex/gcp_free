@@ -137,13 +137,33 @@ def build_pyinstaller_exe(name, onefile=True):
     command.append(str(ROOT_DIR / "gcp.py"))
     subprocess.run(command, check=True, cwd=ROOT_DIR)
 
-    exe_path = PYINSTALLER_DIST_DIR / f"{name}.exe"
+    if onefile:
+        build_output = PYINSTALLER_DIST_DIR / f"{name}.exe"
+        if not build_output.is_file():
+            raise RuntimeError(f"未找到构建产物: {build_output}")
+        return build_output
+
+    build_output = PYINSTALLER_DIST_DIR / name
+    exe_path = build_output / f"{name}.exe"
+    if not build_output.is_dir():
+        raise RuntimeError(f"未找到构建产物目录: {build_output}")
     if not exe_path.is_file():
-        raise RuntimeError(f"未找到构建产物: {exe_path}")
-    return exe_path
+        raise RuntimeError(f"未找到目录模式主程序: {exe_path}")
+    return build_output
 
 
-def sign_executable(exe_path, sign_pfx, sign_password, timestamp_url):
+def resolve_executable_path(build_output):
+    output_path = Path(build_output)
+    if output_path.is_dir():
+        exe_path = output_path / f"{output_path.name}.exe"
+        if not exe_path.is_file():
+            raise RuntimeError(f"未找到目录模式主程序: {exe_path}")
+        return exe_path
+    return output_path
+
+
+def sign_executable(build_output, sign_pfx, sign_password, timestamp_url):
+    exe_path = resolve_executable_path(build_output)
     signtool = find_signtool()
     if not signtool:
         raise RuntimeError("已请求代码签名，但当前环境未找到 signtool.exe。")
@@ -191,14 +211,29 @@ def write_build_info(package_dir, version):
     info_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def make_release_package(exe_path, version, name):
+def copy_build_output(build_output, package_dir):
+    output_path = Path(build_output)
+    if output_path.is_file():
+        shutil.copy2(output_path, package_dir / output_path.name)
+        return
+    if not output_path.is_dir():
+        raise RuntimeError(f"构建产物不存在: {output_path}")
+    for item in output_path.iterdir():
+        target_path = package_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target_path, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target_path)
+
+
+def make_release_package(build_output, version, name):
     package_name = f"{name}-windows-x64-{version}"
     package_dir = RELEASE_DIR / package_name
     if package_dir.exists():
         shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(exe_path, package_dir / exe_path.name)
+    copy_build_output(build_output, package_dir)
     copy_release_assets(package_dir)
     write_build_info(package_dir, version)
 
@@ -223,12 +258,13 @@ def main():
     if args.clean:
         clean_outputs()
 
-    exe_path = build_pyinstaller_exe(name, onefile=args.onefile)
+    build_output = build_pyinstaller_exe(name, onefile=args.onefile)
     if args.sign_pfx:
-        sign_executable(exe_path, args.sign_pfx, args.sign_password, args.timestamp_url)
-    package_dir, zip_path = make_release_package(exe_path, version, name)
+        sign_executable(build_output, args.sign_pfx, args.sign_password, args.timestamp_url)
+    package_dir, zip_path = make_release_package(build_output, version, name)
 
-    print(f"EXE_PATH={exe_path}")
+    print(f"EXE_PATH={resolve_executable_path(build_output)}")
+    print(f"BUILD_OUTPUT={build_output}")
     print(f"PACKAGE_DIR={package_dir}")
     print(f"ZIP_PATH={zip_path}")
 

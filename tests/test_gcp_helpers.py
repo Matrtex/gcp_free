@@ -53,6 +53,7 @@ from gcp import (
     switch_gcloud_account,
     sync_adc_account,
     menu_switch_account_action,
+    run_cli,
     sleep_and_detect_pause,
     summarize_text_block,
     warn_if_long_pause,
@@ -251,7 +252,7 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_insert_firewall.assert_not_called()
 
     @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
-    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
+    @patch("gcp_firewall.delete_firewall_rule", return_value=True)
     @patch("gcp_firewall.wait_for_global_operation")
     @patch("gcp_firewall.insert_firewall_with_retry", return_value=SimpleNamespace(name="op-1"))
     @patch("gcp_firewall.firewalls_client")
@@ -260,19 +261,18 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_firewalls_client,
         mock_insert_firewall,
         _mock_wait_operation,
-        mock_delete_deny_cdn,
+        mock_delete_rule,
         _mock_ensure_rebuild_safe,
     ):
-        mock_firewalls_client.return_value = SimpleNamespace(get=Mock(side_effect=RuntimeError("404 not found")))
+        mock_firewalls_client.return_value = SimpleNamespace(
+            get=Mock(side_effect=RuntimeError("404 not found")),
+            list=Mock(return_value=[]),
+        )
         ip_ranges = [f"10.0.{index // 256}.{index % 256}/32" for index in range(300)]
 
         self.assertTrue(add_deny_cdn_egress("demo-project", ip_ranges, "global/networks/default"))
 
-        mock_delete_deny_cdn.assert_called_once_with(
-            "demo-project",
-            allow_cdn_message=False,
-            network="global/networks/default",
-        )
+        mock_delete_rule.assert_not_called()
         created_rules = [call_args.args[2] for call_args in mock_insert_firewall.call_args_list]
         self.assertEqual([rule.name for rule in created_rules], [
             "deny-cdn-egress-custom-001",
@@ -303,23 +303,81 @@ class GcpHelpersTestCase(unittest.TestCase):
 
     @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
     @patch("gcp_firewall.insert_firewall_with_retry")
-    @patch("gcp_firewall.delete_deny_cdn_egress", return_value=False)
-    @patch("gcp_firewall.firewalls_client", return_value=SimpleNamespace())
+    @patch("gcp_firewall.delete_firewall_rule", return_value=False)
+    @patch("gcp_firewall.firewalls_client")
     def test_add_deny_cdn_egress_stops_when_old_rules_cannot_be_cleaned(
         self,
-        _mock_firewalls_client,
-        mock_delete_deny_cdn,
+        mock_firewalls_client,
+        mock_delete_rule,
         mock_insert_firewall,
         _mock_ensure_rebuild_safe,
     ):
+        mock_firewalls_client.return_value = SimpleNamespace(
+            list=Mock(
+                return_value=[
+                    SimpleNamespace(
+                        name="deny-cdn-egress-custom",
+                        network="https://www.googleapis.com/compute/v1/projects/demo/global/networks/default",
+                        destination_ranges=["10.0.0.1/32"],
+                    )
+                ]
+            )
+        )
         self.assertFalse(add_deny_cdn_egress("demo-project", ["10.0.0.1/32"], "global/networks/default"))
 
-        mock_delete_deny_cdn.assert_called_once_with(
-            "demo-project",
-            allow_cdn_message=False,
-            network="global/networks/default",
-        )
+        mock_delete_rule.assert_called_once_with("demo-project", "deny-cdn-egress-custom")
         mock_insert_firewall.assert_not_called()
+
+    @patch("gcp_firewall.ensure_deny_cdn_rebuild_scope_safe", return_value=True)
+    @patch("gcp_firewall.delete_firewall_rule", return_value=True)
+    @patch("gcp_firewall.wait_for_global_operation")
+    @patch("gcp_firewall.insert_firewall_with_retry")
+    @patch("gcp_firewall.firewalls_client")
+    def test_add_deny_cdn_egress_rolls_back_when_rebuild_fails(
+        self,
+        mock_firewalls_client,
+        mock_insert_firewall,
+        _mock_wait_operation,
+        mock_delete_rule,
+        _mock_ensure_rebuild_safe,
+    ):
+        mock_firewalls_client.return_value = SimpleNamespace(
+            get=Mock(side_effect=RuntimeError("404 not found")),
+            list=Mock(
+                return_value=[
+                    SimpleNamespace(
+                        name="deny-cdn-egress-custom",
+                        network="https://www.googleapis.com/compute/v1/projects/demo/global/networks/default",
+                        destination_ranges=["10.0.0.1/32"],
+                    )
+                ]
+            ),
+        )
+        mock_insert_firewall.side_effect = [
+            SimpleNamespace(name="create-op-1"),
+            RuntimeError("boom"),
+            SimpleNamespace(name="restore-op"),
+        ]
+        ip_ranges = [f"10.0.{index // 256}.{index % 256}/32" for index in range(300)]
+
+        self.assertFalse(add_deny_cdn_egress("demo-project", ip_ranges, "global/networks/default"))
+
+        self.assertEqual(
+            mock_delete_rule.call_args_list,
+            [
+                call("demo-project", "deny-cdn-egress-custom"),
+                call("demo-project", "deny-cdn-egress-custom-001"),
+            ],
+        )
+        created_rules = [call_args.args[2].name for call_args in mock_insert_firewall.call_args_list]
+        self.assertEqual(
+            created_rules,
+            [
+                "deny-cdn-egress-custom-001",
+                "deny-cdn-egress-custom-002",
+                "deny-cdn-egress-custom",
+            ],
+        )
 
     @patch("gcp_firewall.delete_deny_cdn_egress", return_value=True)
     def test_configure_firewall_non_interactive_deletes_deny_cdn_rule(self, mock_delete_deny):
@@ -1169,6 +1227,42 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(project_id, "manual-project")
         mock_manual_project.assert_called_once_with(allow_back=False)
         mock_projects_client.assert_not_called()
+
+    @patch("gcp_cli.restore_cli_project_context")
+    @patch(
+        "gcp_cli.snapshot_cli_project_context",
+        return_value={"gcloud_project": "old-project", "adc_quota_project": "old-quota"},
+    )
+    @patch("gcp_cli.ensure_libraries_or_exit")
+    @patch("gcp_cli.prepare_cli_account_context")
+    @patch("gcp_cli.configure_runtime_logging")
+    def test_run_cli_restores_project_context_when_handler_fails(
+        self,
+        _mock_logging,
+        mock_prepare_context,
+        mock_ensure_libraries,
+        _mock_snapshot_context,
+        mock_restore_context,
+    ):
+        def failing_handler(_args):
+            raise RuntimeError("handler failed")
+
+        args = SimpleNamespace(
+            handler=failing_handler,
+            project_id="demo-project",
+            account=None,
+            dry_run=False,
+            log_file=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "handler failed"):
+            run_cli(args)
+
+        mock_prepare_context.assert_called_once_with(args)
+        mock_ensure_libraries.assert_called_once()
+        mock_restore_context.assert_called_once_with(
+            {"gcloud_project": "old-project", "adc_quota_project": "old-quota"}
+        )
 
     def test_record_reroll_exception_tracks_soft_and_hard_counters(self):
         stats = RerollStats(
