@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from urllib.parse import urlparse
+
 from gcp_common import (
     Any,
     COOLDOWN_JITTER_CAP,
@@ -15,6 +18,7 @@ from gcp_common import (
     REROLL_STOP_WAIT_THRESHOLD,
     RerollStats,
     instances_client,
+    redact_sensitive_text,
     time,
 )
 from gcp_instance import (
@@ -56,6 +60,7 @@ __all__ = [
     'get_legacy_exception_count',
     'format_exception_breakdown',
     'is_oauth_timeout_error',
+    'message_mentions_exact_host',
     'is_permission_denied_error',
     'is_compute_timeout_error',
     'is_instance_stuck_error',
@@ -77,9 +82,9 @@ def print_reroll_summary(stats: Any) -> Any:
     print_info(f"{get_reroll_target_label(stats.target_mode)} 运行摘要")
     print(f"总耗时: {format_duration(time.time() - stats.start_time)}")
     soft_count = get_soft_exception_count(stats)
-    print(f"尝试轮次: {stats.attempts} | 软异常轮次: {soft_count} | 硬异常轮次: {stats.hard_failure_count}")
+    print(f"尝试轮次: {int(stats.attempts)} | 软异常轮次: {int(soft_count)} | 硬异常轮次: {int(stats.hard_failure_count)}")
 
-    exception_breakdown = format_exception_breakdown(stats)
+    exception_breakdown = redact_sensitive_text(format_exception_breakdown(stats))
     if exception_breakdown:
         print(f"异常明细: {exception_breakdown}")
 
@@ -103,7 +108,7 @@ def print_reroll_summary(stats: Any) -> Any:
         print(f"最近结果: {' -> '.join(stats.recent_results)}")
 
     if stats.recent_errors:
-        print(f"最近异常: {' | '.join(stats.recent_errors)}")
+        print(f"最近异常: {' | '.join(redact_sensitive_text(error) for error in stats.recent_errors)}")
 
 def format_timestamp(timestamp_value: Any) -> Any:
     if not timestamp_value:
@@ -184,8 +189,8 @@ def print_reroll_state_snapshot(stats: Any,  state_path: Any,  title: Any="刷�
     print(f"最近 CPU: {stats.last_cpu or '-'}")
     print(f"初始外网 IP: {stats.initial_external_ip or '-'}")
     print(f"最近外网 IP: {stats.last_external_ip or '-'}")
-    print(f"最近异常: {stats.last_error or '-'}")
-    exception_breakdown = format_exception_breakdown(stats)
+    print(f"最近异常: {redact_sensitive_text(stats.last_error or '-')}")
+    exception_breakdown = redact_sensitive_text(format_exception_breakdown(stats))
     if exception_breakdown:
         print(f"异常明细: {exception_breakdown}")
     if stats.success_cpu:
@@ -205,7 +210,7 @@ def print_reroll_state_snapshot(stats: Any,  state_path: Any,  title: Any="刷�
     if stats.recent_results:
         print(f"最近结果: {' -> '.join(stats.recent_results)}")
     if stats.recent_errors:
-        print(f"最近异常列表: {' | '.join(stats.recent_errors)}")
+        print(f"最近异常列表: {' | '.join(redact_sensitive_text(error) for error in stats.recent_errors)}")
 
 def print_reroll_progress(stats: Any,  state_path: Any) -> Any:
     top_cpu = "-"
@@ -241,8 +246,25 @@ def format_exception_breakdown(stats: Any) -> Any:
         parts.append(f"历史未分类 {legacy_count}")
     return " | ".join(parts)
 
+_HOST_ASSIGNMENT_RE = re.compile(r"\bhost=(?P<quote>['\"])(?P<host>[^'\"]+)(?P=quote)", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s)'\"<>]+", re.IGNORECASE)
+
+
+def message_mentions_exact_host(message: Any, expected_host: str) -> Any:
+    expected = expected_host.lower().rstrip(".")
+    text = str(message)
+    for match in _HOST_ASSIGNMENT_RE.finditer(text):
+        if match.group("host").lower().rstrip(".") == expected:
+            return True
+    for match in _URL_RE.finditer(text):
+        parsed = urlparse(match.group(0))
+        if (parsed.hostname or "").lower().rstrip(".") == expected:
+            return True
+    return False
+
+
 def is_oauth_timeout_error(exc: Any) -> Any:
-    return "oauth2.googleapis.com" in str(exc).lower()
+    return message_mentions_exact_host(exc, "oauth2.googleapis.com")
 
 def is_permission_denied_error(exc: Any) -> Any:
     message = str(exc).lower()
@@ -273,7 +295,7 @@ def is_permission_denied_error(exc: Any) -> Any:
 
 def is_compute_timeout_error(exc: Any) -> Any:
     message = str(exc).lower()
-    if "compute.googleapis.com" not in message and "/compute/v1/" not in message:
+    if not message_mentions_exact_host(message, "compute.googleapis.com") and "/compute/v1/" not in message:
         return False
     transient_markers = [
         " 429 ",
@@ -458,7 +480,7 @@ def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="
 
     try:
         while True:
-            last_loop_activity_time = warn_if_long_pause(
+            warn_if_long_pause(
                 last_loop_activity_time,
                 f"{target_label} 主循环（实例 {instance_name}）",
             )
@@ -472,7 +494,6 @@ def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="
             try:
                 ensure_instance_running(instance_client, project_id, zone, instance_name)
                 current_platform = "未检测（当前模式不要求 CPU）"
-                current_status = "RUNNING"
                 if require_amd:
                     current_platform, current_status = wait_for_cpu_platform(
                         instance_client, project_id, zone, instance_name

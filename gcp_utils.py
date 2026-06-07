@@ -32,6 +32,7 @@ from gcp_common import (
     math,
     os,
     random,
+    redact_sensitive_text,
     resolve_asset_path,
     run_doctor,
     subprocess,
@@ -113,7 +114,7 @@ def flush_stdout() -> Any:
     try:
         sys.stdout.flush()
     except OSError:
-        pass
+        return None
 
 def ensure_libraries_or_exit() -> Any:
     try:
@@ -276,7 +277,8 @@ def resolve_zone_for_create(zone: Any=None, region: Any=None, tier: Any=None) ->
                 raise ValueError(
                     f"Zone {zone} (区域 {zone_region}) 不是免费层区域。"
                     f"使用 --tier=free 时，只能选择免费层区域的 zone，"
-                    f"如: us-west1-a, us-central1-a, us-east1-b 等"
+                    f"如: us-west1-a, us-central1-a, us-east1-b 等。"
+                    f"当前免费层区域: {free_region_list}"
                 )
 
             if tier == "paid" and is_free_region:
@@ -433,7 +435,7 @@ def prompt_project_selection(items: Any,  project_id_fn: Any,  display_name_fn: 
         print("输入无效，请重试。")
 
 def summarize_exception(exc: Any,  max_length: Any=160) -> Any:
-    message = " ".join(str(exc).split())
+    message = redact_sensitive_text(" ".join(str(exc).split()))
     if len(message) <= max_length:
         return message
     return message[: max_length - 3] + "..."

@@ -2,7 +2,7 @@ import io
 import unittest
 from unittest.mock import patch
 
-from gcp_logging import AppLogger
+from gcp_logging import AppLogger, redact_sensitive_text
 
 
 class FakeStdout(io.StringIO):
@@ -63,6 +63,21 @@ class LoggingTestCase(unittest.TestCase):
 
         self.assertIn(r"\u8b66\u544a", stream.getvalue())
         self.assertIn(r"\u6d4b\u8bd5\u6d88\u606f", stream.getvalue())
+
+    def test_redact_sensitive_text_hides_common_secret_shapes(self):
+        message = (
+            "password=plain token:abc Authorization: Bearer ya29.demo "
+            "https://user:secret@example.com refresh_token=\"refresh-value\""
+        )
+
+        redacted = redact_sensitive_text(message)
+
+        self.assertNotIn("plain", redacted)
+        self.assertNotIn("abc", redacted)
+        self.assertNotIn("ya29.demo", redacted)
+        self.assertNotIn(":secret@", redacted)
+        self.assertNotIn("refresh-value", redacted)
+        self.assertIn("[REDACTED]", redacted)
 
 
 if __name__ == "__main__":

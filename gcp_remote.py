@@ -14,6 +14,7 @@ from gcp_common import (
     TRAFFIC_LIMIT_GB,
     find_gcloud_command,
     getpass,
+    math,
     os,
     resolve_asset_path,
     shutil,
@@ -37,6 +38,7 @@ from gcp_utils import (
     print_success,
     print_warning,
     sleep_and_detect_pause,
+    summarize_exception,
     summarize_text_block,
 )
 
@@ -142,7 +144,7 @@ def format_traffic_limit_gb(traffic_limit_gb: Any) -> str:
         limit = float(traffic_limit_gb)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"流量监控限额必须是数字: {traffic_limit_gb}") from exc
-    if limit <= 0 or limit != limit or limit in (float("inf"), float("-inf")):
+    if limit <= 0 or not math.isfinite(limit):
         raise ValueError(f"流量监控限额必须是大于 0 的有限数字: {traffic_limit_gb}")
     if limit.is_integer():
         return str(int(limit))
@@ -190,8 +192,8 @@ def cleanup_temp_upload_file(upload_path: Any,  source_path: Any) -> Any:
         return
     try:
         os.remove(upload_path)
-    except OSError:
-        pass
+    except OSError as exc:
+        print_warning(f"清理本地临时上传文件失败: {summarize_exception(exc)}")
 
 def build_remote_script_exec_command(remote_script_path: Any) -> Any:
     return (

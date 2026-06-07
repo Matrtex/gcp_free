@@ -1,9 +1,25 @@
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 from typing import Optional
+
+
+_SENSITIVE_KEY_VALUE_RE = re.compile(
+    r"(?i)((?:\"|')?\b(?:password|passwd|pwd|secret|token|authorization|credential|"
+    r"client_secret|refresh_token|access_token|id_token)\b(?:\"|')?\s*[:=]\s*)(?:\"|')?[^\"'\s,;{}]+"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+")
+_URL_CREDENTIAL_RE = re.compile(r"(://[^:/@\s]+:)[^/@\s]+(@)")
+
+
+def redact_sensitive_text(message: object) -> str:
+    text = str(message)
+    text = _URL_CREDENTIAL_RE.sub(r"\1[REDACTED]\2", text)
+    text = _BEARER_TOKEN_RE.sub(r"\1[REDACTED]", text)
+    return _SENSITIVE_KEY_VALUE_RE.sub(r"\1[REDACTED]", text)
 
 
 class AppLogger:
@@ -56,7 +72,7 @@ class AppLogger:
 
     def _write_console(self: "AppLogger", text: str) -> None:
         stream = sys.stdout
-        line = f"{text}\n"
+        line = f"{redact_sensitive_text(text)}\n"
         try:
             stream.write(line)
         except UnicodeEncodeError:
@@ -90,12 +106,13 @@ class AppLogger:
         message: str,
         color: Optional[str] = None,
     ) -> None:
-        text = f"{prefix} {message}"
+        safe_message = redact_sensitive_text(message)
+        text = f"{prefix} {safe_message}"
         if color and self._should_use_color():
             self._write_console(f"{color}{text}\033[0m")
         else:
             self._write_console(text)
-        self._write_file(level, message)
+        self._write_file(level, safe_message)
 
     def info(self: "AppLogger", message: str) -> None:
         self._emit("INFO", "[信息]", message)

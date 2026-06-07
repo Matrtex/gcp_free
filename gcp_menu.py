@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from gcp_common import (
+    ActionSpec,
     Any,
     RuntimeContext,
     sys,
@@ -74,6 +75,7 @@ __all__ = [
     'menu_traffic_monitor_action',
     'menu_delete_resources_action',
     'menu_doctor_action',
+    'MENU_ACTIONS',
     'main',
 ]
 
@@ -266,11 +268,7 @@ def menu_deploy_dae_config_action(context: Any) -> Any:
     run_remote_action_for_context(
         context,
         "deploy-dae-config",
-        lambda project_id, instance, remote_config: deploy_dae_config(
-            project_id,
-            instance,
-            remote_config,
-        ),
+        deploy_dae_config,
     )
 
 def menu_traffic_monitor_action(context: Any) -> Any:
@@ -306,8 +304,26 @@ def menu_delete_resources_action(context: Any) -> Any:
 def menu_doctor_action(context: Any) -> Any:
     handle_doctor(context.project_id)
 
+MENU_ACTIONS = [
+    ActionSpec("create", "新建实例", "create", "新建实例（可选择免费层或付费区域）", menu_create_action, None),
+    ActionSpec("select-instance", "选择服务器", None, "选择当前服务器", menu_select_instance_action, None),
+    ActionSpec("login-account", "登录新账号", "login-account", "登录新的 gcloud 账号，并同步 ADC", menu_login_account_action, None),
+    ActionSpec("switch-account", "切换已有账号", "switch-account", "切换已登录的 gcloud 账号，并可同步 ADC", menu_switch_account_action, None),
+    ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", menu_reroll_action, None),
+    ActionSpec("reroll-ip", "刷外网 IP", "reroll-ip", "循环重启实例，直到外网 IP 变化", menu_reroll_ip_action, None),
+    ActionSpec("reroll-ip-amd", "刷外网 IP + AMD CPU", "reroll-ip-amd", "循环重启实例，直到外网 IP 变化且命中 AMD/EPYC", menu_reroll_ip_amd_action, None),
+    ActionSpec("show-reroll-state", "查看刷 CPU 状态", "show-reroll-state", "显示当前刷 CPU 状态文件摘要", menu_show_reroll_state_action, None),
+    ActionSpec("firewall", "配置防火墙规则", "firewall", "配置入站/出站规则", menu_firewall_action, None),
+    ActionSpec("apt", "Debian换源", "run-script", "上传并执行 apt.sh", menu_remote_apt_action, None),
+    ActionSpec("dae", "安装 dae", None, "上传并执行 dae.sh", menu_remote_dae_action, None),
+    ActionSpec("dae-config", "上传 config.dae 并启用 dae", "deploy-dae-config", "上传 dae 配置", menu_deploy_dae_config_action, None),
+    ActionSpec("traffic-monitor", "安装流量监控脚本（仅适配 Debian）", None, "安装流量监控脚本", menu_traffic_monitor_action, None),
+    ActionSpec("delete-resources", "删除当前资源", "delete-resources", "删除实例、磁盘和规则", menu_delete_resources_action, None),
+    ActionSpec("doctor", "环境预检", "doctor", "检查本地与云端运行环境", menu_doctor_action, None),
+]
+
+
 def main() -> Any:
-    from gcp_cli import ACTION_SPECS
 
     configure_stdio()
     configure_runtime_logging()
@@ -332,7 +348,7 @@ def main() -> Any:
         else:
             print("当前服务器: 未选择")
         print("------------------------------------------------")
-        for index, action in enumerate(ACTION_SPECS, start=1):
+        for index, action in enumerate(MENU_ACTIONS, start=1):
             print(f"[{index}] {action.menu_label}")
         print("[0] 退出")
         choice = input("请输入数字选择: ").strip()
@@ -345,11 +361,11 @@ def main() -> Any:
             continue
 
         action_index = int(choice) - 1
-        if not (0 <= action_index < len(ACTION_SPECS)):
+        if not (0 <= action_index < len(MENU_ACTIONS)):
             print("输入无效，请重试。")
             continue
 
-        action = ACTION_SPECS[action_index]
+        action = MENU_ACTIONS[action_index]
         handler = action.menu_handler
         if handler is None:
             print_warning(f"{action.menu_label} 暂未绑定菜单处理函数。")

@@ -37,6 +37,7 @@ from gcp import (
     is_transient_gcp_error,
     is_already_exists_error,
     is_operation_in_progress_error,
+    is_oauth_timeout_error,
     is_reroll_state_compatible,
     is_ip_target_met,
     is_target_cpu,
@@ -45,6 +46,7 @@ from gcp import (
     login_gcloud_account,
     list_active_projects_via_gcloud,
     list_gcloud_accounts_via_gcloud,
+    message_mentions_exact_host,
     parse_args,
     prepare_cli_account_context,
     record_reroll_exception,
@@ -1115,6 +1117,14 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(classify_reroll_exception(permission_exc), "permission_denied")
         self.assertEqual(classify_reroll_exception(compute_permission_exc), "permission_denied")
         self.assertEqual(classify_reroll_exception(local_permission_exc), "hard_failure")
+
+    def test_oauth_host_detection_requires_exact_host_match(self):
+        oauth_exc = RuntimeError("HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Read timed out")
+        injected_path = RuntimeError("https://example.com/oauth2.googleapis.com/token timed out")
+
+        self.assertTrue(is_oauth_timeout_error(oauth_exc))
+        self.assertFalse(is_oauth_timeout_error(injected_path))
+        self.assertTrue(message_mentions_exact_host("https://oauth2.googleapis.com/token", "oauth2.googleapis.com"))
 
     @patch("gcp_instance.get_adc_account_email", return_value=("adc@example.com", ""))
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")

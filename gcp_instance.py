@@ -1152,7 +1152,7 @@ def wait_for_instance_status( instance_client: Any,  project_id: Any,  zone: Any
             last_activity_time,
             f"等待实例 {instance_name} 进入 {target_text}",
         )
-        get_started_at = time.time()
+        get_started_at = last_activity_time
         try:
             current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
             last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
@@ -1195,7 +1195,7 @@ def wait_for_instance_status_change( instance_client: Any,  project_id: Any,  zo
             last_activity_time,
             f"等待实例 {instance_name} 脱离 {'/'.join(sorted(from_statuses))}",
         )
-        get_started_at = time.time()
+        get_started_at = last_activity_time
         try:
             current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
             last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} 状态")
@@ -1282,7 +1282,7 @@ def wait_for_cpu_platform( instance_client: Any,  project_id: Any,  zone: Any,  
             last_activity_time,
             f"等待实例 {instance_name} 同步 CPU 平台",
         )
-        get_started_at = time.time()
+        get_started_at = last_activity_time
         try:
             current_inst = get_instance_with_retry(instance_client, project_id, zone, instance_name)
             last_activity_time = warn_if_long_pause(get_started_at, f"获取实例 {instance_name} CPU 信息")
