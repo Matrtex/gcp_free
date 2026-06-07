@@ -202,6 +202,32 @@ def build_remote_script_exec_command(remote_script_path: Any) -> Any:
         "sudo bash \"$tmp\""
     )
 
+def cleanup_remote_temp_path(
+    project_id: Any,
+    instance_info: Any,
+    remote_config: Any,
+    remote_path: Any,
+    dry_run: bool = False,
+) -> Any:
+    target_path = str(remote_path or "").strip()
+    if not target_path:
+        return False
+    cleanup_cmd = build_remote_exec_command(
+        project_id,
+        instance_info,
+        remote_config,
+        f"rm -f '{target_path}'",
+    )
+    if not cleanup_cmd:
+        print_warning(f"无法构建远端临时文件清理命令: {target_path}")
+        return False
+    return run_subprocess_command(
+        cleanup_cmd,
+        "清理远端临时文件",
+        timeout=REMOTE_COMMAND_TIMEOUT,
+        dry_run=dry_run,
+    )
+
 def run_subprocess_command(cmd: Any,  action_desc: Any,  timeout: Any=None,  dry_run: Any=False) -> Any:
     if dry_run:
         print_info(f"[dry-run] {action_desc}")
@@ -509,48 +535,55 @@ def deploy_dae_config(project_id: str,  instance_info: InstanceInfo,  remote_con
             return False
 
     remote_tmp = make_remote_temp_path("gcp_free_config", ".dae")
-    upload_cmd = build_remote_upload_command(
-        project_id,
-        instance_info,
-        remote_config,
-        local_config,
-        remote_tmp,
-    )
-    if not upload_cmd:
-        return False
+    cleanup_needed = False
+    try:
+        upload_cmd = build_remote_upload_command(
+            project_id,
+            instance_info,
+            remote_config,
+            local_config,
+            remote_tmp,
+        )
+        if not upload_cmd:
+            return False
 
-    print_info("正在上传 config.dae ...")
-    if not run_subprocess_command(
-        upload_cmd,
-        "上传 config.dae",
-        timeout=REMOTE_UPLOAD_TIMEOUT,
-        dry_run=dry_run,
-    ):
-        return False
+        cleanup_needed = not dry_run
+        print_info("正在上传 config.dae ...")
+        if not run_subprocess_command(
+            upload_cmd,
+            "上传 config.dae",
+            timeout=REMOTE_UPLOAD_TIMEOUT,
+            dry_run=dry_run,
+        ):
+            return False
 
-    remote_command = (
-        "set -e;"
-        "sudo mkdir -p /usr/local/etc/dae;"
-        f"sudo cp '{remote_tmp}' /usr/local/etc/dae/config.dae;"
-        "sudo chmod 600 /usr/local/etc/dae/config.dae;"
-        "sudo systemctl enable dae;"
-        "sudo systemctl restart dae;"
-        f"rm -f '{remote_tmp}'"
-    )
-    exec_cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
-    if not exec_cmd:
-        return False
+        remote_command = (
+            "set -e;"
+            "sudo mkdir -p /usr/local/etc/dae;"
+            f"sudo cp '{remote_tmp}' /usr/local/etc/dae/config.dae;"
+            "sudo chmod 600 /usr/local/etc/dae/config.dae;"
+            "sudo systemctl enable dae;"
+            "sudo systemctl restart dae;"
+            f"rm -f '{remote_tmp}'"
+        )
+        exec_cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
+        if not exec_cmd:
+            return False
 
-    print_info("正在应用配置并重启 dae ...")
-    if not run_subprocess_command(
-        exec_cmd,
-        "应用 dae 配置",
-        timeout=REMOTE_CONFIG_APPLY_TIMEOUT,
-        dry_run=dry_run,
-    ):
-        return False
-    print_success("配置已更新并重启 dae。")
-    return True
+        print_info("正在应用配置并重启 dae ...")
+        if not run_subprocess_command(
+            exec_cmd,
+            "应用 dae 配置",
+            timeout=REMOTE_CONFIG_APPLY_TIMEOUT,
+            dry_run=dry_run,
+        ):
+            return False
+        cleanup_needed = False
+        print_success("配置已更新并重启 dae。")
+        return True
+    finally:
+        if cleanup_needed:
+            cleanup_remote_temp_path(project_id, instance_info, remote_config, remote_tmp, dry_run=dry_run)
 
 def build_remote_status_command() -> str:
     return (

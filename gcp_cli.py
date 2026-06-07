@@ -27,13 +27,16 @@ from gcp_instance import (
     find_instance_by_name,
     get_current_adc_account,
     get_current_gcloud_account,
-    get_current_gcloud_project,
     login_gcloud_account,
     list_instances,
     prepare_gcloud_context,
     print_instance_list,
+    restore_adc_credentials,
     restore_adc_quota_project,
+    restore_gcloud_account,
     restore_gcloud_project,
+    snapshot_adc_credentials,
+    snapshot_gcloud_config_value,
     switch_gcloud_account,
 )
 from gcp_menu import (
@@ -198,15 +201,22 @@ def snapshot_cli_project_context(args: Any) -> Any:
     if not project_id:
         return None
     return {
-        "gcloud_project": get_current_gcloud_project(),
+        "gcloud_account": snapshot_gcloud_config_value("account"),
+        "gcloud_project": snapshot_gcloud_config_value("project"),
+        "adc_credentials": snapshot_adc_credentials(),
         "adc_quota_project": get_current_adc_quota_project(),
     }
 
 def restore_cli_project_context(snapshot: Any) -> None:
     if not snapshot:
         return
+    if "adc_credentials" in snapshot:
+        restore_adc_credentials(snapshot.get("adc_credentials"))
+    else:
+        restore_adc_quota_project(snapshot.get("adc_quota_project"))
+    if "gcloud_account" in snapshot:
+        restore_gcloud_account(snapshot.get("gcloud_account"))
     restore_gcloud_project(snapshot.get("gcloud_project"))
-    restore_adc_quota_project(snapshot.get("adc_quota_project"))
 
 def get_cli_instance(args: Any) -> Any:
     if getattr(args, "dry_run", False) and getattr(args, "instance", None) and getattr(args, "zone", None):

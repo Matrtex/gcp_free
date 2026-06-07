@@ -27,6 +27,7 @@ from gcp_common import (
     projects_client,
     resourcemanager_v3,
     subprocess,
+    tempfile,
     time,
     traceback,
     zones_client,
@@ -264,12 +265,31 @@ def set_gcloud_project(project_id: Any) -> Any:
     return True
 
 def get_current_gcloud_project() -> Any:
+    snapshot = snapshot_gcloud_config_value("project")
+    if not snapshot.get("read_ok"):
+        return ""
+    return str(snapshot.get("value") or "").strip()
+
+def snapshot_gcloud_config_value(config_name: Any) -> Any:
+    name = str(config_name or "").strip()
+    snapshot = {
+        "name": name,
+        "read_ok": False,
+        "value": "",
+        "is_unset": False,
+        "error": "",
+    }
+    if not name:
+        snapshot["error"] = "gcloud 配置项名称为空"
+        return snapshot
+
     gcloud_command = find_gcloud_command()
     if not gcloud_command:
-        return ""
+        snapshot["error"] = "当前环境未找到 gcloud"
+        return snapshot
 
     result = subprocess.run(
-        [gcloud_command, "config", "get-value", "project"],
+        [gcloud_command, "config", "get-value", name],
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
@@ -277,13 +297,60 @@ def get_current_gcloud_project() -> Any:
     )
     if result.returncode != 0:
         stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
-        print_warning(f"读取 gcloud 默认项目失败: {stderr_summary}")
-        return ""
+        snapshot["error"] = stderr_summary
+        print_warning(f"读取 gcloud 配置项 {name} 失败: {stderr_summary}")
+        return snapshot
 
-    current_project = str(result.stdout or "").strip()
-    if current_project == "(unset)":
-        return ""
-    return current_project
+    current_value = str(result.stdout or "").strip()
+    snapshot["read_ok"] = True
+    if current_value == "(unset)":
+        snapshot["is_unset"] = True
+        snapshot["value"] = ""
+    else:
+        snapshot["value"] = current_value
+    return snapshot
+
+def restore_gcloud_config_value(config_name: Any, snapshot_or_value: Any, display_name: Any = None) -> Any:
+    name = str(config_name or "").strip()
+    label = str(display_name or f"gcloud 配置项 {name}").strip()
+    if isinstance(snapshot_or_value, dict):
+        if not snapshot_or_value.get("read_ok"):
+            reason = str(snapshot_or_value.get("error") or "原始值读取失败").strip()
+            print_warning(f"跳过恢复 {label}；{reason}。")
+            return False
+        target_value = str(snapshot_or_value.get("value") or "").strip()
+    else:
+        target_value = str(snapshot_or_value or "").strip()
+
+    if not name:
+        return False
+
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        return False
+
+    if target_value:
+        command = [gcloud_command, "config", "set", name, target_value]
+    else:
+        command = [gcloud_command, "config", "unset", name]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        print_warning(f"恢复 {label} 失败: {stderr_summary}")
+        return False
+
+    if target_value:
+        print_info(f"已恢复 {label}: {target_value}")
+    else:
+        print_info(f"已恢复 {label}为空。")
+    return True
 
 def get_gcloud_config_dir() -> Path:
     config_override = str(os.environ.get("CLOUDSDK_CONFIG", "") or "").strip()
@@ -319,33 +386,14 @@ def get_current_adc_quota_project() -> Any:
     return str(data.get("quota_project_id") or "").strip()
 
 def restore_gcloud_project(project_id: Any) -> Any:
-    gcloud_command = find_gcloud_command()
-    if not gcloud_command:
-        return False
+    return restore_gcloud_config_value("project", project_id, "gcloud 默认项目")
 
-    target_project = str(project_id or "").strip()
-    if target_project:
-        command = [gcloud_command, "config", "set", "project", target_project]
-    else:
-        command = [gcloud_command, "config", "unset", "project"]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
-        print_warning(f"恢复 gcloud 默认项目失败: {stderr_summary}")
-        return False
-
-    if target_project:
-        print_info(f"已恢复 gcloud 默认项目: {target_project}")
-    else:
-        print_info("已恢复 gcloud 默认项目为空。")
-    return True
+def restore_gcloud_account(account: Any) -> Any:
+    restored = restore_gcloud_config_value("account", account, "gcloud 活跃账号")
+    if restored:
+        clear_google_cloud_client_caches()
+        clear_adc_account_cache()
+    return restored
 
 def set_adc_quota_project(project_id: Any) -> Any:
     gcloud_command = find_gcloud_command()
@@ -369,6 +417,88 @@ def set_adc_quota_project(project_id: Any) -> Any:
     print_info(f"已设置 ADC quota project: {target_project}")
     return True
 
+def write_bytes_atomically(target_path: Path, content: bytes) -> None:
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = None
+    existing_mode = None
+    try:
+        if target.exists():
+            existing_mode = target.stat().st_mode
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        with os.fdopen(fd, "wb") as temp_file:
+            temp_file.write(content)
+        if existing_mode is not None:
+            os.chmod(temp_name, existing_mode)
+        Path(temp_name).replace(target)
+        temp_name = None
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+def write_text_atomically(target_path: Path, content: str, encoding: str = "utf-8") -> None:
+    write_bytes_atomically(Path(target_path), content.encode(encoding))
+
+def snapshot_adc_credentials() -> Any:
+    adc_credentials_path = get_adc_credentials_path()
+    snapshot = {
+        "read_ok": False,
+        "path": str(adc_credentials_path),
+        "exists": False,
+        "content": b"",
+        "error": "",
+    }
+    try:
+        if not adc_credentials_path.exists():
+            snapshot["read_ok"] = True
+            return snapshot
+        if not adc_credentials_path.is_file():
+            snapshot["error"] = f"不是普通文件: {adc_credentials_path}"
+            return snapshot
+        snapshot["content"] = adc_credentials_path.read_bytes()
+        snapshot["exists"] = True
+        snapshot["read_ok"] = True
+        return snapshot
+    except OSError as exc:
+        snapshot["error"] = str(exc)
+        print_warning(f"读取 ADC 凭据文件快照失败: {adc_credentials_path} ({exc})")
+        return snapshot
+
+def restore_adc_credentials(snapshot: Any) -> Any:
+    if not snapshot:
+        return False
+    if not isinstance(snapshot, dict) or not snapshot.get("read_ok"):
+        reason = ""
+        if isinstance(snapshot, dict):
+            reason = str(snapshot.get("error") or "").strip()
+        print_warning(f"跳过恢复 ADC 凭据文件；{reason or '原始文件读取失败'}。")
+        return False
+
+    adc_credentials_path = Path(snapshot.get("path") or get_adc_credentials_path())
+    try:
+        if snapshot.get("exists"):
+            content = snapshot.get("content") or b""
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            write_bytes_atomically(adc_credentials_path, content)
+            print_info("已恢复 ADC 凭据文件。")
+        elif adc_credentials_path.exists():
+            adc_credentials_path.unlink()
+            print_info("已恢复 ADC 凭据文件为空。")
+        clear_google_cloud_client_caches()
+        clear_adc_account_cache()
+        return True
+    except OSError as exc:
+        print_warning(f"恢复 ADC 凭据文件失败: {adc_credentials_path} ({exc})")
+        return False
+
 def restore_adc_quota_project(project_id: Any) -> Any:
     adc_credentials_path, data = load_adc_credentials_data()
     target_project = str(project_id or "").strip()
@@ -391,7 +521,8 @@ def restore_adc_quota_project(project_id: Any) -> Any:
         data.pop("quota_project_id", None)
 
     try:
-        adc_credentials_path.write_text(
+        write_text_atomically(
+            adc_credentials_path,
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -403,6 +534,8 @@ def restore_adc_quota_project(project_id: Any) -> Any:
         print_info(f"已恢复 ADC quota project: {target_project}")
     else:
         print_info("已恢复 ADC quota project 为空。")
+    clear_google_cloud_client_caches()
+    clear_adc_account_cache()
     return True
 
 def apply_selected_project(project_id: Any, account: Any = None) -> Any:
