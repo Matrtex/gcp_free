@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
 import subprocess
 
+import gcp_cli
+import gcp_instance
 from gcp import (
     classify_reroll_exception,
     clear_adc_account_cache,
@@ -1263,6 +1265,117 @@ class GcpHelpersTestCase(unittest.TestCase):
         mock_restore_context.assert_called_once_with(
             {"gcloud_project": "old-project", "adc_quota_project": "old-quota"}
         )
+
+    @patch("gcp_cli.restore_cli_project_context")
+    @patch(
+        "gcp_cli.snapshot_cli_project_context",
+        return_value={
+            "gcloud_account": {"read_ok": True, "value": "old@example.com"},
+            "gcloud_project": {"read_ok": True, "value": "old-project"},
+            "adc_credentials": {"read_ok": True, "exists": True, "content": b"{}"},
+            "adc_quota_project": "old-quota",
+        },
+    )
+    @patch("gcp_cli.prepare_cli_account_context", side_effect=RuntimeError("adc sync failed"))
+    @patch("gcp_cli.configure_runtime_logging")
+    def test_run_cli_restores_context_when_preflight_fails(
+        self,
+        _mock_logging,
+        _mock_prepare_context,
+        _mock_snapshot_context,
+        mock_restore_context,
+    ):
+        args = SimpleNamespace(
+            handler=Mock(),
+            project_id="demo-project",
+            account="demo@example.com",
+            dry_run=False,
+            log_file=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "adc sync failed"):
+            run_cli(args)
+
+        mock_restore_context.assert_called_once_with(
+            {
+                "gcloud_account": {"read_ok": True, "value": "old@example.com"},
+                "gcloud_project": {"read_ok": True, "value": "old-project"},
+                "adc_credentials": {"read_ok": True, "exists": True, "content": b"{}"},
+                "adc_quota_project": "old-quota",
+            }
+        )
+
+    @patch("gcp_cli.restore_gcloud_project")
+    @patch("gcp_cli.restore_gcloud_account")
+    @patch("gcp_cli.restore_adc_quota_project")
+    @patch("gcp_cli.restore_adc_credentials")
+    def test_restore_cli_project_context_restores_account_project_and_adc_file(
+        self,
+        mock_restore_adc_credentials,
+        mock_restore_adc_quota,
+        mock_restore_account,
+        mock_restore_project,
+    ):
+        snapshot = {
+            "gcloud_account": {"read_ok": True, "value": "old@example.com"},
+            "gcloud_project": {"read_ok": True, "value": "old-project"},
+            "adc_credentials": {"read_ok": True, "exists": True, "content": b"old"},
+            "adc_quota_project": "old-quota",
+        }
+
+        gcp_cli.restore_cli_project_context(snapshot)
+
+        mock_restore_adc_credentials.assert_called_once_with(snapshot["adc_credentials"])
+        mock_restore_account.assert_called_once_with(snapshot["gcloud_account"])
+        mock_restore_project.assert_called_once_with(snapshot["gcloud_project"])
+        mock_restore_adc_quota.assert_not_called()
+
+    @patch("gcp_instance.subprocess.run")
+    def test_restore_gcloud_project_skips_when_snapshot_read_failed(self, mock_run):
+        restored = gcp_instance.restore_gcloud_project(
+            {
+                "read_ok": False,
+                "value": "",
+                "error": "gcloud config get-value project failed",
+            }
+        )
+
+        self.assertFalse(restored)
+        mock_run.assert_not_called()
+
+    @patch("gcp_instance.write_text_atomically")
+    def test_restore_adc_quota_project_uses_atomic_write(self, mock_atomic_write):
+        with TemporaryDirectory() as tmp_dir:
+            adc_path = Path(tmp_dir, "application_default_credentials.json")
+            adc_path.write_text(
+                '{"client_id":"demo","quota_project_id":"new-quota"}',
+                encoding="utf-8",
+            )
+            with patch("gcp_instance.get_adc_credentials_path", return_value=adc_path):
+                restored = gcp_instance.restore_adc_quota_project("old-quota")
+
+        self.assertTrue(restored)
+        mock_atomic_write.assert_called_once()
+        self.assertEqual(mock_atomic_write.call_args.args[0], adc_path)
+        self.assertIn('"quota_project_id": "old-quota"', mock_atomic_write.call_args.args[1])
+
+    def test_restore_adc_credentials_restores_full_snapshot(self):
+        with TemporaryDirectory() as tmp_dir:
+            adc_path = Path(tmp_dir, "application_default_credentials.json")
+            original_content = '{"client_id":"old","quota_project_id":"old-quota"}\n'
+            adc_path.write_text(original_content, encoding="utf-8")
+            with patch("gcp_instance.get_adc_credentials_path", return_value=adc_path):
+                snapshot = gcp_instance.snapshot_adc_credentials()
+                adc_path.write_text(
+                    '{"client_id":"new","quota_project_id":"new-quota"}\n',
+                    encoding="utf-8",
+                )
+
+                restored = gcp_instance.restore_adc_credentials(snapshot)
+                restored_content = adc_path.read_text(encoding="utf-8")
+
+        self.assertTrue(restored)
+        self.assertEqual(restored_content, original_content)
 
     def test_record_reroll_exception_tracks_soft_and_hard_counters(self):
         stats = RerollStats(

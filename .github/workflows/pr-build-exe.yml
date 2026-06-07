@@ -29,13 +29,13 @@ concurrency:
 
 jobs:
   build-windows-exe:
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     env:
       PYTHONWARNINGS: ignore::FutureWarning:google.api_core._python_version_support
 
     steps:
       - name: 检出 PR 代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
@@ -57,7 +57,7 @@ jobs:
           Write-Host "已检出 PR 源码：$env:SOURCE_LABEL ($actualSha)"
 
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -106,7 +106,7 @@ jobs:
           python scripts/build_exe.py --clean --version $env:BUILD_VERSION
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gcp-free-pr-windows-exe-${{ steps.version.outputs.build_version }}
           path: dist/release/*

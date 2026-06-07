@@ -4,6 +4,8 @@
 
 `gcp_free` 是一个面向 GCP Compute Engine 免费实例运维的 Python CLI 工具集，目标不是做通用 IaC，而是围绕“快速创建实例、刷到目标 CPU / 外网 IP、完成基础远程配置”这一条操作链提供半自动化能力。
 
+维护型项目 Wiki 位于 `docs/wiki.md`，用于承载比 README 更完整的执行模型、账号上下文、远程执行、状态文件、测试发布和排障说明。
+
 当前仓库同时支持两种使用方式：
 
 - 交互式菜单：直接运行 `gcp.py` / `start.ps1` / `start.sh` 后进入菜单。
@@ -100,6 +102,9 @@
   - ADC
   - 默认项目
   - ADC quota project
+- 需要 preflight 的非交互 CLI 会在切换前快照 `gcloud` 活跃账号、默认项目和完整 ADC 凭据文件；如果账号切换、ADC 同步或 handler 失败，会尝试恢复原上下文。
+- `gcloud config get-value` 快照会区分“读取成功但未设置”和“读取失败”。读取失败时恢复阶段不得把未知状态当成空字符串执行 `gcloud config unset project`。
+- ADC 凭据文件恢复必须使用临时文件替换模式，避免写入中断损坏 `application_default_credentials.json`。
 
 ### 区域与可用区约束
 
@@ -112,6 +117,7 @@
 - 优先使用 `gcloud` 远程模式；只有在显式指定 `--remote-method ssh` 或本机没有 `gcloud` 时，才切换到原生 SSH。
 - 若使用 SSH 且传入 `--ssh-key`，会先校验私钥文件是否存在。
 - 远程执行前会等待实例就绪；实例未就绪时不会盲目继续。
+- 上传到远端 `/tmp` 的临时脚本或配置文件必须覆盖成功和失败路径清理；清理失败只告警，不覆盖原始失败结果。
 
 ### `setup` 流程约束
 

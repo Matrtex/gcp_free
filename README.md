@@ -7,6 +7,7 @@
 ## 项目上下文
 
 如果你是维护者、贡献者，或正在用 agent / AI 协助开发，建议先阅读 [contexts/context.md](contexts/context.md) 了解项目定位、模块职责、账号约束、关键默认值和验证方式。
+更完整的维护文档见 [项目 Wiki](docs/wiki.md)，其中包含执行模型、账号上下文、远程执行、状态文件、测试发布和排障手册。
 
 ## 功能概览
 
@@ -139,6 +140,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 - ADC quota project
 
 非交互 CLI 命令建议显式加 `--account <你的Google账号邮箱>`，避免使用旧的账号或 ADC 状态。
+需要 preflight 的 CLI 会在切换前快照 `gcloud` 活跃账号、默认项目和 ADC 凭据文件；如果账号切换、ADC 同步或后续 handler 失败，会尝试恢复原上下文。读取快照失败时不会把未知状态当作空项目执行 `unset`。
 
 环境预检：
 

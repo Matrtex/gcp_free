@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   build-windows-exe:
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
 
     steps:
       - name: 拒绝外部源码输入
@@ -49,14 +49,14 @@ jobs:
           exit 1
 
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.ref }}
           persist-credentials: false
 
       - name: 等待自动检查通过
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const owner = context.repo.owner;
@@ -128,7 +128,7 @@ jobs:
             }
 
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -264,7 +264,7 @@ jobs:
           }
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gcp-free-windows-exe-${{ steps.version.outputs.build_version }}
           path: dist/release/*
@@ -273,7 +273,7 @@ jobs:
 
       - name: 创建 GitHub Release
         if: steps.version.outputs.create_release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.build_version }}
           target_commitish: ${{ github.sha }}
