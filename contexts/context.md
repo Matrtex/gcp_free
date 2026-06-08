@@ -6,6 +6,16 @@
 
 维护型项目 Wiki 位于 `docs/wiki.md`，用于承载比 README 更完整的执行模型、账号上下文、远程执行、状态文件、测试发布和排障说明。
 
+技术规范位于 `specs/`，用于记录维护时必须遵守的边界和不变量：
+
+- `specs/README.md`：规范索引和更新规则。
+- `specs/architecture.md`：入口、模块边界、菜单 / CLI 动作表和兼容层约束。
+- `specs/account-context.md`：`gcloud`、ADC、默认项目和 quota project 的事务性切换 / 回滚语义。
+- `specs/remote-state.md`：远程执行、临时文件清理、状态文件和资源路径约束。
+- `specs/security-quality.md`：日志脱敏、CodeQL / Secret scanning、CI 和本地验证要求。
+
+项目许可证为 MIT License，根目录 `LICENSE` 是唯一许可证源文件；README、Wiki 和 specs 中的许可证说明应指向该文件。
+
 当前仓库同时支持两种使用方式：
 
 - 交互式菜单：直接运行 `gcp.py` / `start.ps1` / `start.sh` 后进入菜单。
@@ -50,6 +60,7 @@
 ### CLI 组织方式
 
 - `gcp_cli.py` 通过 `ACTION_SPECS` / `ACTION_SPEC_MAP` 维护动作描述与 handler 映射。
+- `gcp_menu.py` 通过 `MENU_ACTIONS` 维护交互菜单动作列表。菜单动作表与 CLI 动作表相互独立，避免 `gcp_cli.py` 和 `gcp_menu.py` 形成循环导入。
 - `build_arg_parser()` 负责定义所有子命令。
 - `run_cli()` 负责执行 handler，并在必要时先调用 `prepare_cli_account_context()` 校验账号上下文。
 - `handle_setup_cli()` 是最高层编排入口，会把创建实例、刷 CPU、防火墙、换源、安装 `dae`、上传配置、安装流量监控串成一个工作流。
@@ -80,7 +91,7 @@
 - `gcp_operations.py`：operation 等待、瞬时错误判定、重试逻辑。
 - `gcp_utils.py`：输出、交互、配置解析和一些通用辅助函数。
 - `gcp_models.py`：数据模型。
-- `gcp_logging.py`：日志写入与控制台输出适配。
+- `gcp_logging.py`：日志写入、控制台输出适配和敏感字段脱敏。
 - `gcp_state.py`：JSON 状态文件持久化。
 
 ### 远程脚本与发布
@@ -105,6 +116,7 @@
 - 需要 preflight 的非交互 CLI 会在切换前快照 `gcloud` 活跃账号、默认项目和完整 ADC 凭据文件；如果账号切换、ADC 同步或 handler 失败，会尝试恢复原上下文。
 - `gcloud config get-value` 快照会区分“读取成功但未设置”和“读取失败”。读取失败时恢复阶段不得把未知状态当成空字符串执行 `gcloud config unset project`。
 - ADC 凭据文件恢复必须使用临时文件替换模式，避免写入中断损坏 `application_default_credentials.json`。
+- 日志、异常摘要和状态文件中保存的异常文本不得明文保留 password、token、Authorization、credential、URL 内嵌密码等敏感字段；统一使用 `redact_sensitive_text()` 或经过它的封装路径。
 
 ### 区域与可用区约束
 
@@ -118,6 +130,7 @@
 - 若使用 SSH 且传入 `--ssh-key`，会先校验私钥文件是否存在。
 - 远程执行前会等待实例就绪；实例未就绪时不会盲目继续。
 - 上传到远端 `/tmp` 的临时脚本或配置文件必须覆盖成功和失败路径清理；清理失败只告警，不覆盖原始失败结果。
+- 本地临时上传文件清理失败也只告警，不覆盖原始远程执行结果。
 
 ### `setup` 流程约束
 
@@ -184,12 +197,16 @@
 - GitHub Actions `自动检查` 会在 `push` 到 `master` 和 `pull_request` 时运行。
 - CI 矩阵覆盖 `ubuntu-latest` / `windows-latest` 与 Python `3.10`、`3.11`、`3.12`。
 - CI 使用 `python -m unittest discover -s tests -v`，不是 `pytest`。
+- GitHub Actions `CodeQL` 会在 `push` / `pull_request` 到 `master`、每周定时和手动触发时运行，查询集为 `security-extended,security-and-quality`。
+- GitHub Secret scanning 和 push protection 已启用；Secret scanning alerts 应保持为 0。Code scanning alerts 处理优先修代码，确认误报时才能 dismiss，并写清楚中文理由。
+- 仓库许可证为 MIT License；如果以后修改许可证，必须同步更新 `LICENSE`、README、Wiki、context 和 specs。
 
 ## 维护提示
 
 ### 修改代码时优先注意
 
 - 如果修改 CLI 参数、子命令名称、`setup` 编排顺序或账号同步行为，必须同步更新 `README.md` 和本文件。
+- 如果修改模块边界、账号上下文、远程执行、日志脱敏或 CI / CodeQL 行为，必须同步更新 `specs/` 中对应规范。
 - 如果修改 `gcp_config.py` 中的轮询 / 超时 / 冷却常量，优先说明修改目的属于：
   - 减少 429 / 502
   - 提高刷 CPU / IP 成功率
@@ -203,13 +220,16 @@
 ### 当前代码结构的注意点
 
 - `gcp_common.py` 的设计是“集中重导出共享依赖”，这样减少了重复 import，但也提高了模块耦合度。
+- `gcp_common.py` 通过显式 `__all__` 表达重导出公共面；不要为了消除“未使用导入”而随意删除其中符号，先确认下游模块是否经由该公共面导入。
 - `gcp_app.py` 依赖大量星号导入，适合作为兼容层，不适合继续堆业务逻辑。
 - 如果未来继续扩展功能，优先在职责模块中新增显式函数，再由 `gcp_cli.py` / `gcp_menu.py` 编排，不要继续把复杂逻辑回灌到入口层。
+- 菜单动作列表在 `gcp_menu.MENU_ACTIONS`，CLI 动作列表在 `gcp_cli.ACTION_SPECS`；新增动作时需要同步两处的用户可见入口，但不要恢复双向导入。
 - `tests/test_gcp_helpers.py` 已经比较大；如果未来继续增长，优先按领域拆分，而不是继续把所有回归都堆到一个文件。
 
 ## 给后续 Agent 的建议
 
 - 先读本文件，再读 `README.md`。
+- 修改行为前先读 `specs/` 中相关规范；规范和代码冲突时，以代码事实为准修正文档，再谨慎改代码。
 - 处理线上行为问题时，先确认是菜单路径还是非交互 CLI 路径。
 - 遇到账号 / 权限 / 403 / 串项目问题时，优先检查 `gcloud` 与 ADC 是否一致，再看业务代码。
 - 需要排查“为什么本地能跑、EXE 不能跑”时，优先检查运行目录下是否覆盖了 `config.dae`、`cdnip.txt` 或状态文件。

@@ -8,6 +8,7 @@
 
 如果你是维护者、贡献者，或正在用 agent / AI 协助开发，建议先阅读 [contexts/context.md](contexts/context.md) 了解项目定位、模块职责、账号约束、关键默认值和验证方式。
 更完整的维护文档见 [项目 Wiki](docs/wiki.md)，其中包含执行模型、账号上下文、远程执行、状态文件、测试发布和排障手册。
+技术规范见 [specs/](specs/)，用于记录架构边界、账号上下文、远程执行、状态文件和安全质量门禁。
 
 ## 功能概览
 
@@ -21,7 +22,7 @@
 ## 快速开始（推荐）
 
 打开 https://console.cloud.google.com/
-在右上角点击 Cloud Shell 
+在右上角点击 Cloud Shell
 在 Cloud Shell 服务器运行
 ```bash
 # 初次运行
@@ -383,6 +384,10 @@ PowerShell 下可用下面的命令生成 Base64：
 - `scripts/dae.sh`: 安装 dae
 - `scripts/net_iptables.sh`: 流量监控（iptables）
 - `scripts/net_shutdown.sh`: 超额自动关机
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。
 
 ## 常见问题
 

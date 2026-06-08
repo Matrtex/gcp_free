@@ -17,6 +17,7 @@
 - 测试和质量门禁
 - 打包和发布
 - 排障手册
+- 技术规范和许可证
 - 维护约定
 
 ## 项目目标
@@ -521,6 +522,18 @@ gcloud auth application-default login
 - 查看 `.gcp_free_state/` 中的状态文件。
 - 遇到 OAuth 或 Compute API 瞬时错误时观察冷却日志。
 - 如果频繁 429 / 502，优先调整 `gcp_config.py` 中的轮询和重试常量。
+
+## 技术规范和许可证
+
+维护规范位于 `specs/`：
+
+- `specs/README.md`：规范索引和更新规则。
+- `specs/architecture.md`：入口、模块边界、菜单 / CLI 动作表和兼容层约束。
+- `specs/account-context.md`：`gcloud`、ADC、默认项目和 quota project 的事务性切换 / 回滚语义。
+- `specs/remote-state.md`：远程执行、临时文件清理、状态文件和资源路径约束。
+- `specs/security-quality.md`：日志脱敏、CodeQL / Secret scanning、CI、发布 workflow 和许可证要求。
+
+项目使用 MIT License，根目录 `LICENSE` 是唯一许可证源文件。发布包、README、Wiki 或其它文档提到许可证时，应指向该文件，避免维护多份可能漂移的许可证正文。
 
 ## 维护约定
 
