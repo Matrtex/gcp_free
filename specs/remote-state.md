@@ -75,6 +75,18 @@
 
 不匹配时不能复用旧状态。
 
+## 本地 gcloud 网络配置变更
+
+`switch-ip` 和 `reroll-ip --method access-config` 不是远程执行动作，也不写入 `.gcp_free_state/`。它们通过本机 `gcloud compute instances delete-access-config` 和 `gcloud compute instances add-access-config` 修改实例网卡外网 access config，以重新分配临时外网 IP。
+
+维护约束：
+
+- 执行前必须刷新实例信息，并要求目标实例为 `RUNNING`。
+- 不得复用刷 CPU / IP 的状态文件，也不得把一次性 access config 切换写入 `reroll_ip_state.json`。
+- `dry_run` 只打印将执行的本地 `gcloud` 命令，不应修改实例网络配置。
+- 删除和新增 access config 之间外部连接会短暂断开，文档和菜单提示必须保留该提醒。
+- 未显式传 `--access-config-name` 时应优先探测现有 access config 名称；探测失败时回退 `external-nat`。
+
 ## 资源路径
 
 静态资源读取优先级：

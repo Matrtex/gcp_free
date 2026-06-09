@@ -31,6 +31,7 @@ from gcp import (
     handle_update_gcp_ip_ranges_cli,
     handle_login_account_cli,
     handle_switch_account_cli,
+    handle_switch_ip_cli,
     handle_firewall_cli,
     handle_reroll_ip_amd_cli,
     handle_reroll_ip_cli,
@@ -55,6 +56,7 @@ from gcp import (
     select_gcp_project,
     select_startup_gcloud_account,
     switch_gcloud_account,
+    switch_external_ip_without_restart,
     sync_adc_account,
     menu_switch_account_action,
     run_cli,
@@ -985,9 +987,135 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         self.assertIs(ip_args.handler, handle_reroll_ip_cli)
         self.assertTrue(ip_args.resume)
+        self.assertEqual(ip_args.method, "restart")
         self.assertEqual(ip_args.account, "demo@example.com")
         self.assertTrue(ip_args.auth_no_browser)
         self.assertIs(ip_amd_args.handler, handle_reroll_ip_amd_cli)
+
+    def test_switch_ip_cli_command_parses(self):
+        args = parse_args([
+            "switch-ip",
+            "--project-id",
+            "demo-project",
+            "--account",
+            "demo@example.com",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--access-config-name",
+            "External NAT",
+            "--network-interface",
+            "nic1",
+            "--network-tier",
+            "PREMIUM",
+            "--dry-run",
+        ])
+
+        self.assertIs(args.handler, handle_switch_ip_cli)
+        self.assertEqual(args.access_config_name, "External NAT")
+        self.assertEqual(args.network_interface, "nic1")
+        self.assertEqual(args.network_tier, "PREMIUM")
+        self.assertTrue(args.dry_run)
+
+    def test_reroll_ip_access_config_method_parses(self):
+        args = parse_args([
+            "reroll-ip",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--method",
+            "access-config",
+            "--network-tier",
+            "standard",
+            "--dry-run",
+        ])
+
+        self.assertIs(args.handler, handle_reroll_ip_cli)
+        self.assertEqual(args.method, "access-config")
+        self.assertEqual(args.network_tier, "standard")
+        self.assertTrue(args.dry_run)
+
+    @patch("gcp_cli.switch_external_ip_without_restart")
+    @patch("gcp_cli.get_cli_instance")
+    def test_handle_switch_ip_cli_calls_access_config_switch(self, mock_get_instance, mock_switch_ip):
+        instance = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_get_instance.return_value = instance
+        args = parse_args([
+            "switch-ip",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--access-config-name",
+            "External NAT",
+            "--network-interface",
+            "nic1",
+            "--network-tier",
+            "PREMIUM",
+            "--dry-run",
+        ])
+
+        handle_switch_ip_cli(args)
+
+        mock_switch_ip.assert_called_once_with(
+            "demo-project",
+            instance,
+            access_config_name="External NAT",
+            network_interface="nic1",
+            network_tier="PREMIUM",
+            dry_run=True,
+        )
+
+    @patch("gcp_cli.switch_external_ip_without_restart")
+    @patch("gcp_cli.reroll_ip_loop")
+    @patch("gcp_cli.get_cli_instance")
+    def test_handle_reroll_ip_cli_access_config_method_skips_restart_loop(
+        self,
+        mock_get_instance,
+        mock_reroll_ip_loop,
+        mock_switch_ip,
+    ):
+        instance = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_get_instance.return_value = instance
+        args = parse_args([
+            "reroll-ip",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--method",
+            "access-config",
+            "--dry-run",
+        ])
+
+        handle_reroll_ip_cli(args)
+
+        mock_reroll_ip_loop.assert_not_called()
+        mock_switch_ip.assert_called_once()
 
     def test_firewall_cli_delete_commands_parse(self):
         deny_args = parse_args([
@@ -1607,6 +1735,133 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(instances[0].name, "vm-1")
         self.assertEqual(instances[0].zone, "us-west1-a")
         self.assertEqual(instances[0].external_ip, "35.1.2.3")
+
+    @patch("gcp_instance.print_success")
+    @patch("gcp_instance.refresh_instance_info")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_external_ip_without_restart_recreates_access_config(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        mock_refresh,
+        _mock_print_success,
+    ):
+        before = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        after = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.4.5.6",
+        )
+        mock_refresh.side_effect = [before, after]
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    '{"networkInterfaces":[{"name":"nic0","accessConfigs":['
+                    '{"name":"External NAT","natIP":"35.1.2.3","type":"ONE_TO_ONE_NAT"}]}]}'
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+
+        result = switch_external_ip_without_restart("demo-project", before)
+
+        self.assertEqual(result.external_ip, "35.4.5.6")
+        describe_cmd = mock_run.call_args_list[0].args[0]
+        delete_cmd = mock_run.call_args_list[1].args[0]
+        add_cmd = mock_run.call_args_list[2].args[0]
+        self.assertEqual(
+            describe_cmd,
+            [
+                "gcloud",
+                "compute",
+                "instances",
+                "describe",
+                "vm-1",
+                "--project",
+                "demo-project",
+                "--zone",
+                "us-west1-a",
+                "--format=json(networkInterfaces)",
+            ],
+        )
+        self.assertEqual(delete_cmd[:4], ["gcloud", "compute", "instances", "delete-access-config"])
+        self.assertIn("--access-config-name", delete_cmd)
+        self.assertIn("External NAT", delete_cmd)
+        self.assertIn("--quiet", delete_cmd)
+        self.assertEqual(add_cmd[:4], ["gcloud", "compute", "instances", "add-access-config"])
+        self.assertIn("--network-tier", add_cmd)
+        self.assertIn("STANDARD", add_cmd)
+
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.refresh_instance_info")
+    @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
+    @patch("gcp_instance.subprocess.run")
+    def test_switch_external_ip_without_restart_adds_when_no_external_ip(
+        self,
+        mock_run,
+        _mock_find_gcloud,
+        mock_refresh,
+        _mock_print_info,
+    ):
+        before = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="-",
+        )
+        after = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.4.5.6",
+        )
+        mock_refresh.side_effect = [before, after]
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"networkInterfaces":[{"name":"nic0","accessConfigs":[]}]}',
+                stderr="",
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+
+        result = switch_external_ip_without_restart(
+            "demo-project",
+            before,
+            access_config_name="external-nat",
+            network_interface="nic0",
+            network_tier="premium",
+        )
+
+        self.assertEqual(result.external_ip, "35.4.5.6")
+        commands = [call_item.args[0] for call_item in mock_run.call_args_list]
+        self.assertFalse(any("delete-access-config" in command for command in commands))
+        self.assertTrue(any("add-access-config" in command for command in commands))
+        self.assertIn("PREMIUM", commands[-1])
 
     @patch("gcp_instance.list_instances")
     @patch("gcp_instance.get_instance_by_name_with_zone")

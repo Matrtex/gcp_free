@@ -30,7 +30,7 @@ gcp.py
 
 - `gcp_cli.py`：非交互 CLI 参数、handler、`setup` 编排和账号 preflight。
 - `gcp_menu.py`：交互菜单、菜单动作和人工输入流程。
-- `gcp_instance.py`：账号、项目、实例查询、实例创建和状态等待。
+- `gcp_instance.py`：账号、项目、实例查询、实例创建、状态等待和实例网络配置变更。
 - `gcp_reroll.py`：刷 CPU / IP 循环、状态恢复、异常分类和冷却策略。
 - `gcp_firewall.py`：防火墙规则、CDN 出站拒绝和资源清理。
 - `gcp_remote.py`：远程命令构造、上传、执行、OS 检测和状态面板。
@@ -60,6 +60,18 @@ gcp.py
 5. 更新 README、Wiki、context 和相关 specs。
 
 不得让 `gcp_menu.py` import `gcp_cli.py`。`gcp_cli.py` 可以引用菜单 action 作为 CLI 和菜单共享动作元数据的来源，但菜单路径不能反向依赖 CLI 动作表。
+
+## 实例网络配置动作
+
+不停机切换临时外网 IP 属于实例网络配置变更，实际行为应放在 `gcp_instance.py`，再由 `gcp_cli.py` 和 `gcp_menu.py` 编排入口。
+
+当前 `switch-ip` / `reroll-ip --method access-config` 使用本机 `gcloud compute instances delete-access-config` 和 `gcloud compute instances add-access-config`。维护约束：
+
+- 不得改变 `reroll-ip` 默认 stop/start 循环刷 IP 语义。
+- 新增或修改 access config 参数时，应同步 CLI parser、菜单说明、README、Wiki、context 和测试。
+- 执行前必须刷新实例状态并要求目标实例为 `RUNNING`。
+- 未显式传 `--access-config-name` 时应优先探测现有 access config 名称，探测失败时再回退 `external-nat`。
+- 新增临时外网 IP 的 `network tier` 默认保持 `STANDARD`，避免与创建实例时的默认配置不一致。
 
 ## 兼容层约束
 

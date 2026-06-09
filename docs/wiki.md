@@ -28,7 +28,7 @@
 2. 选择目标 GCP 项目。
 3. 创建免费层规格实例。
 4. 通过 stop/start 循环刷到目标 CPU 平台，通常是 AMD / EPYC。
-5. 通过 stop/start 循环刷新外网 IP。
+5. 通过 stop/start 循环刷新外网 IP，或不停机重建外网 access config 切换临时 IP。
 6. 配置防火墙。
 7. 远程换源、安装 `dae`、上传 `config.dae`。
 8. 安装流量监控脚本。
@@ -140,6 +140,13 @@ bash start.sh
 
 ```powershell
 .\start.ps1 reroll-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区> --resume
+```
+
+不停机切换临时外网 IP：
+
+```powershell
+.\start.ps1 switch-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 reroll-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区> --method access-config
 ```
 
 同时刷 IP 和 AMD / EPYC：
@@ -264,6 +271,20 @@ setup 的原则是“资源创建前能验证的错误尽量提前失败”。�
 ### 刷 IP
 
 刷 IP 以启动前外网 IP 为基准。若启动前已有外网 IP，则刷到不同 IP 才算命中；若启动前没有外网 IP，则获取任意有效外网 IP 即算命中。
+
+### 不停机切换临时外网 IP
+
+`switch-ip` 在 `gcp_instance.py` 中调用本机 `gcloud`，按顺序执行：
+
+1. 刷新实例信息，确认实例处于 `RUNNING`。
+2. 自动探测目标网卡现有外网 access config 名称；探测失败时回退到 `external-nat`。
+3. 执行 `gcloud compute instances delete-access-config` 删除旧外网 access config。
+4. 执行 `gcloud compute instances add-access-config` 添加新的临时外网 access config。
+5. 再次刷新实例信息并输出旧 IP 到新 IP 的变化。
+
+该路径不会停止实例，也不会写入 `.gcp_free_state/` 刷机状态文件。它适合只想重分配临时外网 IP 的场景。外部连接会在 access config 删除和重建期间短暂断开；如果当前实例没有外网 IP，会跳过删除步骤，直接添加新的临时外网 IP。新增 access config 默认使用 `nic0` 和 `STANDARD` network tier，可用 `--network-interface`、`--network-tier` 和 `--access-config-name` 覆盖。
+
+`reroll-ip --method access-config` 是兼容入口，行为与 `switch-ip` 相同；不传 `--method` 时，`reroll-ip` 仍然保持原来的 stop/start 循环刷 IP 语义。
 
 ### 状态恢复
 

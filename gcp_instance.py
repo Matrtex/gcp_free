@@ -45,6 +45,7 @@ from gcp_operations import (
     wait_for_operation,
 )
 from gcp_utils import (
+    format_command_for_log,
     format_duration,
     is_not_found_error,
     print_error,
@@ -94,6 +95,7 @@ __all__ = [
     'find_instance_by_name',
     'select_instance',
     'refresh_instance_info',
+    'switch_external_ip_without_restart',
     'wait_for_instance_status',
     'wait_for_instance_status_change',
     'ensure_instance_running',
@@ -1132,6 +1134,155 @@ def refresh_instance_info(project_id: Any,  instance_info: Any,  announce: Any=F
             f"已刷新实例详情: 状态 {refreshed.status} | 外网IP: {refreshed.external_ip} | "
             f"CPU: {refreshed.cpu_platform}"
         )
+    return refreshed
+
+def run_gcloud_access_config_command(command: Any, action_name: Any, dry_run: Any=False) -> None:
+    if dry_run:
+        print_info(f"[dry-run] {action_name}: {format_command_for_log(command)}")
+        return
+
+    print_info(f"正在执行 {action_name}...")
+    print_info(f"命令: {format_command_for_log(command)}")
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        raise RuntimeError(f"{action_name}失败: {stderr_summary}")
+
+def detect_access_config_name(
+    gcloud_command: Any,
+    project_id: Any,
+    instance_info: Any,
+    network_interface: Any,
+) -> Any:
+    result = subprocess.run(
+        [
+            gcloud_command,
+            "compute",
+            "instances",
+            "describe",
+            instance_info.name,
+            "--project",
+            project_id,
+            "--zone",
+            instance_info.zone,
+            "--format=json(networkInterfaces)",
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr_summary = summarize_text_block(result.stderr) or f"退出码: {result.returncode}"
+        print_warning(f"探测 access config 名称失败，将使用 external-nat: {stderr_summary}")
+        return "external-nat"
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except Exception as exc:
+        print_warning(f"解析 access config 探测结果失败，将使用 external-nat: {summarize_exception(exc)}")
+        return "external-nat"
+    interfaces = payload.get("networkInterfaces") or []
+    for interface_item in interfaces:
+        if str(interface_item.get("name") or "nic0").strip() != network_interface:
+            continue
+        for access_config in interface_item.get("accessConfigs") or []:
+            if access_config.get("natIP") or access_config.get("type") == "ONE_TO_ONE_NAT":
+                name = str(access_config.get("name") or "").strip()
+                if name:
+                    return name
+    print_info("未探测到现有 access config 名称，将使用 external-nat。")
+    return "external-nat"
+
+def switch_external_ip_without_restart(
+    project_id: Any,
+    instance_info: Any,
+    access_config_name: Any = None,
+    network_interface: Any = "nic0",
+    network_tier: Any = "STANDARD",
+    dry_run: Any = False,
+) -> Any:
+    gcloud_command = find_gcloud_command()
+    if not gcloud_command:
+        if dry_run:
+            gcloud_command = "gcloud"
+        else:
+            raise RuntimeError("当前环境未找到 gcloud，无法不停机切换外网 IP。")
+
+    interface = str(network_interface or "nic0").strip()
+    tier = str(network_tier or "STANDARD").strip().upper()
+    if not interface:
+        raise ValueError("网卡名称不能为空。")
+    if tier not in {"STANDARD", "PREMIUM"}:
+        raise ValueError("network tier 只支持 STANDARD 或 PREMIUM。")
+
+    current_info = instance_info
+    if not dry_run:
+        current_info = refresh_instance_info(project_id, instance_info, announce=True)
+        if str(current_info.status or "").upper() != "RUNNING":
+            raise ValueError(
+                f"不停机换 IP 要求实例当前为 RUNNING，当前状态是 {current_info.status or 'UNKNOWN'}。"
+            )
+    elif str(current_info.status or "").upper() not in {"RUNNING", "UNKNOWN"}:
+        print_warning(
+            f"[dry-run] 当前缓存状态是 {current_info.status}；真实执行时会要求实例处于 RUNNING。"
+        )
+
+    old_ip = str(current_info.external_ip or "-").strip() or "-"
+    access_config = str(access_config_name or "").strip()
+    if not access_config:
+        if dry_run:
+            access_config = "external-nat"
+        else:
+            access_config = detect_access_config_name(
+                gcloud_command,
+                project_id,
+                current_info,
+                interface,
+            )
+    base_command = [
+        gcloud_command,
+        "compute",
+        "instances",
+    ]
+    instance_flags = [
+        current_info.name,
+        "--project",
+        project_id,
+        "--zone",
+        current_info.zone,
+        "--access-config-name",
+        access_config,
+        "--network-interface",
+        interface,
+    ]
+
+    should_delete_access_config = old_ip != "-" or str(current_info.status or "").upper() == "UNKNOWN"
+    if should_delete_access_config:
+        delete_command = base_command + ["delete-access-config"] + instance_flags + ["--quiet"]
+        run_gcloud_access_config_command(delete_command, "删除现有外网 access config", dry_run=dry_run)
+    else:
+        print_info("当前实例没有外网 IP，跳过删除 access config，直接添加新的临时外网 IP。")
+
+    add_command = base_command + ["add-access-config"] + instance_flags + ["--network-tier", tier]
+    run_gcloud_access_config_command(add_command, "添加新的临时外网 access config", dry_run=dry_run)
+
+    if dry_run:
+        print_info("[dry-run] 已打印不停机换 IP 命令，未修改实例网络配置。")
+        return current_info
+
+    refreshed = refresh_instance_info(project_id, current_info, announce=True)
+    new_ip = str(refreshed.external_ip or "-").strip() or "-"
+    if old_ip != "-" and new_ip == old_ip:
+        print_warning(f"外网 IP 仍为 {new_ip}；GCP 未分配不同地址，请稍后重试。")
+    else:
+        print_success(f"不停机换外网 IP 完成: {old_ip} -> {new_ip}")
     return refreshed
 
 def wait_for_instance_status( instance_client: Any,  project_id: Any,  zone: Any,  instance_name: Any,  expected_statuses: Any,  timeout: Any=INSTANCE_STATUS_WAIT_TIMEOUT,  poll_interval: Any=INSTANCE_STATUS_POLL_INTERVAL,  heartbeat_interval: Any=INSTANCE_STATUS_HEARTBEAT_INTERVAL,  ) -> Any:

@@ -37,6 +37,7 @@ from gcp_instance import (
     restore_gcloud_project,
     snapshot_adc_credentials,
     snapshot_gcloud_config_value,
+    switch_external_ip_without_restart,
     switch_gcloud_account,
 )
 from gcp_menu import (
@@ -53,6 +54,7 @@ from gcp_menu import (
     menu_reroll_ip_amd_action,
     menu_select_instance_action,
     menu_switch_account_action,
+    menu_switch_ip_action,
     menu_show_reroll_state_action,
     menu_traffic_monitor_action,
 )
@@ -92,6 +94,7 @@ __all__ = [
     'handle_switch_account_cli',
     'handle_reroll_amd_cli',
     'handle_reroll_ip_cli',
+    'handle_switch_ip_cli',
     'handle_reroll_ip_amd_cli',
     'handle_firewall_cli',
     'handle_run_script_cli',
@@ -317,11 +320,36 @@ def handle_reroll_amd_cli(args: Namespace) -> None:
 
 def handle_reroll_ip_cli(args: Namespace) -> None:
     instance_info = get_cli_instance(args)
+    method = getattr(args, "method", "restart")
+    if method == "access-config":
+        switch_external_ip_without_restart(
+            args.project_id,
+            instance_info,
+            access_config_name=getattr(args, "access_config_name", None),
+            network_interface=getattr(args, "network_interface", "nic0"),
+            network_tier=getattr(args, "network_tier", "STANDARD"),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+        return
+    if getattr(args, "dry_run", False):
+        raise ValueError("reroll-ip --dry-run 仅支持 --method access-config。")
+
     reroll_ip_loop(
         args.project_id,
         instance_info,
         state_file=args.state_file,
         resume=args.resume,
+    )
+
+def handle_switch_ip_cli(args: Namespace) -> None:
+    instance_info = get_cli_instance(args)
+    switch_external_ip_without_restart(
+        args.project_id,
+        instance_info,
+        access_config_name=getattr(args, "access_config_name", None),
+        network_interface=getattr(args, "network_interface", "nic0"),
+        network_tier=getattr(args, "network_tier", "STANDARD"),
+        dry_run=bool(getattr(args, "dry_run", False)),
     )
 
 def handle_reroll_ip_amd_cli(args: Namespace) -> None:
@@ -495,6 +523,7 @@ ACTION_SPECS = [
     ActionSpec("switch-account", "切换已有账号", "switch-account", "切换已登录的 gcloud 账号，并可同步 ADC", menu_switch_account_action, handle_switch_account_cli),
     ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", menu_reroll_action, handle_reroll_amd_cli),
     ActionSpec("reroll-ip", "刷外网 IP", "reroll-ip", "循环重启实例，直到外网 IP 变化", menu_reroll_ip_action, handle_reroll_ip_cli),
+    ActionSpec("switch-ip", "不停机换外网 IP", "switch-ip", "删除并重建 access config，重新分配临时外网 IP", menu_switch_ip_action, handle_switch_ip_cli),
     ActionSpec("reroll-ip-amd", "刷外网 IP + AMD CPU", "reroll-ip-amd", "循环重启实例，直到外网 IP 变化且命中 AMD/EPYC", menu_reroll_ip_amd_action, handle_reroll_ip_amd_cli),
     ActionSpec("show-reroll-state", "查看刷 CPU 状态", "show-reroll-state", "显示当前刷 CPU 状态文件摘要", menu_show_reroll_state_action, handle_show_reroll_state_cli),
     ActionSpec("firewall", "配置防火墙规则", "firewall", "配置入站/出站规则", menu_firewall_action, handle_firewall_cli),
@@ -543,6 +572,24 @@ def build_arg_parser() -> Any:
     remote_parent.add_argument("--ssh-port", default="22", help="SSH 端口，仅在 ssh 模式下生效")
     remote_parent.add_argument("--ssh-key", help="SSH 私钥路径，仅在 ssh 模式下生效")
     remote_parent.add_argument("--dry-run", action="store_true", help="仅打印远程命令，不真正执行")
+
+    def add_access_config_options(subparser: Any) -> None:
+        subparser.add_argument(
+            "--access-config-name",
+            help="外网 access config 名称；默认自动探测，探测失败时回退 external-nat",
+        )
+        subparser.add_argument(
+            "--network-interface",
+            default="nic0",
+            help="目标网卡名称，默认 nic0",
+        )
+        subparser.add_argument(
+            "--network-tier",
+            choices=["STANDARD", "PREMIUM", "standard", "premium"],
+            default="STANDARD",
+            help="新增临时外网 IP 使用的 network tier，默认 STANDARD",
+        )
+        subparser.add_argument("--dry-run", action="store_true", help="仅打印 gcloud 命令，不修改实例网络配置")
 
     create_parser = subparsers.add_parser(
         "create",
@@ -626,8 +673,23 @@ def build_arg_parser() -> Any:
         "--state-file",
         help="刷 IP 状态文件路径，默认写入项目目录下的 .gcp_free_state/reroll_ip_state.json",
     )
+    reroll_ip_parser.add_argument(
+        "--method",
+        choices=["restart", "access-config"],
+        default="restart",
+        help="刷 IP 方式：restart=停启实例循环刷 IP；access-config=不停机删除并重建外网 access config",
+    )
     reroll_ip_parser.add_argument("--resume", action="store_true", help="从已有状态文件恢复累计统计并继续执行")
+    add_access_config_options(reroll_ip_parser)
     reroll_ip_parser.set_defaults(handler=ACTION_SPEC_MAP["reroll-ip"].cli_handler)
+
+    switch_ip_parser = subparsers.add_parser(
+        "switch-ip",
+        parents=[instance_parent],
+        help=ACTION_SPEC_MAP["switch-ip"].description,
+    )
+    add_access_config_options(switch_ip_parser)
+    switch_ip_parser.set_defaults(handler=ACTION_SPEC_MAP["switch-ip"].cli_handler)
 
     reroll_ip_amd_parser = subparsers.add_parser(
         "reroll-ip-amd",

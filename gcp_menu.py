@@ -23,6 +23,7 @@ from gcp_instance import (
     select_os_image,
     select_zone,
     switch_gcloud_account,
+    switch_external_ip_without_restart,
     warn_if_adc_account_mismatch,
 )
 from gcp_remote import (
@@ -66,6 +67,7 @@ __all__ = [
     'run_menu_reroll_mode',
     'menu_reroll_action',
     'menu_reroll_ip_action',
+    'menu_switch_ip_action',
     'menu_reroll_ip_amd_action',
     'menu_show_reroll_state_action',
     'menu_firewall_action',
@@ -218,6 +220,18 @@ def menu_reroll_ip_action(context: Any) -> Any:
         "检测到当前实例存在可恢复的刷 IP 状态，将自动继续上次进度。",
     )
 
+def menu_switch_ip_action(context: Any) -> Any:
+    current_instance = ensure_context_instance(context)
+    if not current_instance:
+        return
+    print_warning("不停机换 IP 会删除并重建实例外网 access config，现有外部连接会短暂断开。")
+    if not prompt_yes_no("确认现在切换临时外网 IP", default=False):
+        return
+    context.current_instance = switch_external_ip_without_restart(
+        context.project_id,
+        current_instance,
+    )
+
 def menu_reroll_ip_amd_action(context: Any) -> Any:
     run_menu_reroll_mode(
         context,
@@ -311,6 +325,7 @@ MENU_ACTIONS = [
     ActionSpec("switch-account", "切换已有账号", "switch-account", "切换已登录的 gcloud 账号，并可同步 ADC", menu_switch_account_action, None),
     ActionSpec("reroll-amd", "刷 AMD CPU", "reroll-amd", "循环重刷 CPU，直到命中 AMD/EPYC", menu_reroll_action, None),
     ActionSpec("reroll-ip", "刷外网 IP", "reroll-ip", "循环重启实例，直到外网 IP 变化", menu_reroll_ip_action, None),
+    ActionSpec("switch-ip", "不停机换外网 IP", "switch-ip", "删除并重建 access config，重新分配临时外网 IP", menu_switch_ip_action, None),
     ActionSpec("reroll-ip-amd", "刷外网 IP + AMD CPU", "reroll-ip-amd", "循环重启实例，直到外网 IP 变化且命中 AMD/EPYC", menu_reroll_ip_amd_action, None),
     ActionSpec("show-reroll-state", "查看刷 CPU 状态", "show-reroll-state", "显示当前刷 CPU 状态文件摘要", menu_show_reroll_state_action, None),
     ActionSpec("firewall", "配置防火墙规则", "firewall", "配置入站/出站规则", menu_firewall_action, None),
