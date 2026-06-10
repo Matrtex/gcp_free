@@ -20,6 +20,7 @@
 - 配置防火墙规则
 - 换源、安装 dae、上传 `config.dae`
 - 远程安装流量监控脚本（iptables 监控 / 超额自动关机）
+
 ## 快速开始（推荐）
 
 打开 https://console.cloud.google.com/
@@ -45,6 +46,7 @@ cd ~/gcp_free && bash start.sh
 - 已安装 Google Cloud SDK（`gcloud`）
 - 已登录并具备对应项目权限（建议先 `gcloud auth application-default login`）
 - Python 3
+
 ### Windows PowerShell 运行脚本
 
 先确保 `gcloud` 可用，并完成这两步认证：
@@ -99,7 +101,7 @@ Windows PowerShell：
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install google-cloud-compute google-cloud-resource-manager
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 gcloud auth application-default login
 .\.venv\Scripts\python.exe gcp.py
 ```
@@ -109,7 +111,7 @@ Linux / macOS / WSL：
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install google-cloud-compute google-cloud-resource-manager
+python -m pip install -r requirements.txt
 python gcp.py
 ```
 
@@ -208,7 +210,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 非交互远程 dry-run：
 
 ```powershell
-.\start.ps1 run-script --project-id <你的项目ID> --instance <实例名> --zone <可用区> --dry-run apt
+.\start.ps1 run-script --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --dry-run apt
 ```
 
 防火墙规则：
@@ -250,7 +252,7 @@ python scripts/build_exe.py --clean --version v1.0.0
 远程状态仪表盘：
 
 ```powershell
-.\start.ps1 status --project-id <你的项目ID> --instance <实例名> --zone <可用区>
+.\start.ps1 status --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
 ```
 
 状态命令会读取远端 `vnstat` 当月流量、`dae` 服务状态、根分区磁盘使用率和系统运行时长；如果组件未安装，只显示警告，不自动安装。
@@ -294,12 +296,10 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 ## GitHub Actions
 
-仓库现在包含六条 GitHub Actions：
+仓库现在包含六条 GitHub Actions workflow：
 
 - `自动检查`
   在 `push` 到 `master` 和 `pull_request` 时自动执行语法检查与单元测试。
-- 本地如果需要运行与 CI 一致的 lint 环境，请安装开发依赖：
-  `python -m pip install -r requirements-dev.txt`
 - `构建并发布 Windows EXE`
   支持两种触发方式：
   1. 在 GitHub Actions 页面手动运行 `workflow_dispatch`
@@ -310,6 +310,14 @@ python scripts/build_exe.py --clean --version v1.0.0
   由 PR 评论指令触发，只构建并上传 artifact，不读取发布或签名密钥。
 - `清理 GitHub Actions 缓存`
   每天北京时间 03:30 自动清理 Actions cache，也支持手动触发；默认删除 7 天未访问的 cache，并在总量超过 6 GB 时按最久未访问优先删除。
+- `CodeQL`
+  在 `push` / `pull_request` 到 `master`、每周定时和手动触发时运行 Python CodeQL 分析，查询集为 `security-extended,security-and-quality`。
+
+本地如果需要运行与 CI 一致的 lint 环境，请安装开发依赖：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+```
 
 如果你想通过命令触发手动构建，可以使用 GitHub CLI：
 
@@ -377,7 +385,7 @@ PowerShell 下可用下面的命令生成 Base64：
 - `gcp_config.py`: 配置常量
 - `gcp_clients.py`: GCP client 工厂
 - `gcp_operations.py`: API 重试、瞬时错误判定与 operation 等待
-- `gcp_instance.py`: 项目/实例查询、创建与状态轮询
+- `gcp_instance.py`: 项目/实例查询、创建、状态轮询、外网 access config 切换、账号与项目选择
 - `gcp_reroll.py`: 刷 CPU 状态持久化、异常分类与循环逻辑
 - `gcp_firewall.py`: 防火墙与免费资源清理
 - `gcp_remote.py`: SSH/SCP、远程脚本上传执行与状态仪表盘

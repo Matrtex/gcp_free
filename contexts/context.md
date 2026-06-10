@@ -176,6 +176,10 @@
 - 默认支持系统镜像：
   - Debian 12
   - Ubuntu 22.04
+- 外网 access config 切换默认值：
+  - 网卡：`nic0`
+  - network tier：`STANDARD`
+  - 自动探测配置名失败时回退：`external-nat`
 
 ## 测试与验证
 
@@ -197,7 +201,7 @@
 ### CI 事实
 
 - GitHub Actions `自动检查` 会在 `push` 到 `master` 和 `pull_request` 时运行。
-- CI 矩阵覆盖 `ubuntu-latest` / `windows-latest` 与 Python `3.10`、`3.11`、`3.12`。
+- CI 矩阵覆盖 `ubuntu-latest` / `windows-2025-vs2026` 与 Python `3.10`、`3.11`、`3.12`。
 - CI 使用 `python -m unittest discover -s tests -v`，不是 `pytest`。
 - GitHub Actions `CodeQL` 会在 `push` / `pull_request` 到 `master`、每周定时和手动触发时运行，查询集为 `security-extended,security-and-quality`。
 - GitHub Secret scanning 和 push protection 已启用；Secret scanning alerts 应保持为 0。Code scanning alerts 处理优先修代码，确认误报时才能 dismiss，并写清楚中文理由。

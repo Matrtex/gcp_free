@@ -146,6 +146,7 @@ bash start.sh
 
 ```powershell
 .\start.ps1 switch-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 switch-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区> --dry-run
 .\start.ps1 reroll-ip --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区> --method access-config
 ```
 
@@ -440,6 +441,7 @@ GitHub Actions 包含：
 - PR 评论触发 EXE 构建。
 - PR Windows EXE 构建。
 - 清理 GitHub Actions 缓存。
+- CodeQL。
 
 正式 Release 建议在默认分支检查通过后再触发。
 
@@ -586,6 +588,7 @@ gcloud auth application-default login
 - `README.md`
 - `contexts/context.md`
 - 本 wiki
+- 相关 `specs/`
 - 相关 CLI parser 测试
 
 ### 新增脚本
