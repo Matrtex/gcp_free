@@ -120,6 +120,12 @@ def is_operation_in_progress_error(exc: Any) -> Any:
     if google_exceptions and isinstance(exc, google_exceptions.Conflict):
         return True
 
+    if (
+        ("stop operation" in message or "start operation" in message)
+        and ("already" in message or "in progress" in message or "pending" in message)
+    ):
+        return True
+
     conflict_markers = [
         " 409 ",
         "already in progress",

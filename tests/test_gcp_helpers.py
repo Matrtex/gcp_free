@@ -20,6 +20,7 @@ from gcp import (
     delete_managed_firewall_rules,
     find_instance_by_name,
     ensure_instance_running,
+    ensure_instance_stopped,
     get_current_adc_account,
     get_instance_cache_key,
     get_oauth_circuit_breaker_cooldown,
@@ -200,6 +201,14 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertTrue(
             is_operation_in_progress_error(
                 RuntimeError("409 POST https://compute.googleapis.com/compute/v1/projects/demo: operation is already in progress")
+            )
+        )
+        self.assertTrue(
+            is_operation_in_progress_error(
+                RuntimeError(
+                    "400 POST https://compute.googleapis.com/compute/v1/projects/demo/zones/us-west1-a/"
+                    "instances/vm-1/stop: A stop operation is already in progress for this instance"
+                )
             )
         )
 
@@ -1713,6 +1722,39 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(instance.status, "RUNNING")
         mock_wait_operation.assert_not_called()
         mock_wait_for_instance_status.assert_not_called()
+
+    @patch("gcp_instance.print_info")
+    @patch("gcp_instance.wait_for_instance_status")
+    @patch("gcp_instance.wait_for_operation")
+    @patch("gcp_instance.wait_for_instance_status_change")
+    @patch("gcp_instance.stop_instance_with_retry")
+    @patch("gcp_instance.get_instance_with_retry")
+    def test_ensure_instance_stopped_waits_when_stop_operation_already_running(
+        self,
+        mock_get_instance,
+        mock_stop_instance,
+        mock_wait_status_change,
+        mock_wait_operation,
+        mock_wait_for_instance_status,
+        _mock_print_info,
+    ):
+        mock_get_instance.return_value = SimpleNamespace(status="RUNNING")
+        mock_stop_instance.side_effect = RuntimeError(
+            "400 POST https://compute.googleapis.com/compute/v1/projects/demo/zones/us-west1-a/"
+            "instances/vm-1/stop: A stop operation is already in progress for this instance"
+        )
+        mock_wait_status_change.return_value = (SimpleNamespace(status="STOPPING"), "STOPPING")
+        mock_wait_for_instance_status.return_value = (SimpleNamespace(status="STOPPED"), "STOPPED")
+
+        instance, _elapsed = ensure_instance_stopped(
+            instance_client=None,
+            project_id="demo-project",
+            zone="us-west1-a",
+            instance_name="vm-1",
+        )
+
+        self.assertEqual(instance.status, "STOPPED")
+        mock_wait_operation.assert_not_called()
 
     @patch("gcp_instance.find_gcloud_command", return_value="gcloud")
     @patch("gcp_instance.subprocess.run")

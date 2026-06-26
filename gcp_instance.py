@@ -37,6 +37,7 @@ from gcp_operations import (
     get_image_from_family_with_retry,
     get_instance_with_retry,
     insert_instance_with_retry,
+    is_operation_in_progress_error,
     is_transient_gcp_error,
     list_zones_with_retry,
     search_projects_with_retry,
@@ -1394,7 +1395,13 @@ def ensure_instance_running(instance_client: Any,  project_id: Any,  zone: Any, 
 
     if current_status in {"TERMINATED", "STOPPED"}:
         print_info(f"正在启动虚拟机 {instance_name}...")
-        operation = start_instance_with_retry(instance_client, project_id, zone, instance_name)
+        try:
+            operation = start_instance_with_retry(instance_client, project_id, zone, instance_name)
+        except Exception as exc:
+            if not is_operation_in_progress_error(exc):
+                raise
+            operation = None
+            print_info("检测到已有启动操作正在进行，改为等待实例状态。")
         # 先盯实例状态变化，能避免“operation 已提交成功但我们还在同步等待”造成的重复耗时。
         changed_inst, changed_status = wait_for_instance_status_change(
             instance_client,
@@ -1404,9 +1411,12 @@ def ensure_instance_running(instance_client: Any,  project_id: Any,  zone: Any, 
             {"TERMINATED", "STOPPED"},
         )
         if changed_inst is None:
-            print_info("实例状态尚未变化，继续检查启动操作状态...")
-            wait_for_operation(project_id, zone, operation.name, f"启动虚拟机 {instance_name}")
-            print_info("虚拟机已通电，正在等待系统初始化...")
+            if operation is not None:
+                print_info("实例状态尚未变化，继续检查启动操作状态...")
+                wait_for_operation(project_id, zone, operation.name, f"启动虚拟机 {instance_name}")
+                print_info("虚拟机已通电，正在等待系统初始化...")
+            else:
+                print_info("实例状态尚未变化，继续等待进入 RUNNING...")
         elif changed_status == "RUNNING":
             print_info("虚拟机已进入 RUNNING。")
             return changed_inst
@@ -1476,7 +1486,13 @@ def ensure_instance_stopped(instance_client: Any,  project_id: Any,  zone: Any, 
     if current_status == "STOPPING":
         print_info(f"虚拟机 {instance_name} 正在关停，等待其完全停止...")
     else:
-        operation = stop_instance_with_retry(instance_client, project_id, zone, instance_name)
+        try:
+            operation = stop_instance_with_retry(instance_client, project_id, zone, instance_name)
+        except Exception as exc:
+            if not is_operation_in_progress_error(exc):
+                raise
+            operation = None
+            print_info("检测到已有关停操作正在进行，改为等待实例状态。")
         # 关停同样优先看状态变化，只有状态迟迟不动时才回退等 operation。
         changed_inst, changed_status = wait_for_instance_status_change(
             instance_client,
@@ -1486,8 +1502,11 @@ def ensure_instance_stopped(instance_client: Any,  project_id: Any,  zone: Any, 
             {"RUNNING"},
         )
         if changed_inst is None:
-            print_info("实例状态尚未变化，继续检查关停操作状态...")
-            wait_for_operation(project_id, zone, operation.name, f"关停虚拟机 {instance_name}")
+            if operation is not None:
+                print_info("实例状态尚未变化，继续检查关停操作状态...")
+                wait_for_operation(project_id, zone, operation.name, f"关停虚拟机 {instance_name}")
+            else:
+                print_info("实例状态尚未变化，继续等待完全停止...")
         elif changed_status in {"TERMINATED", "STOPPED"}:
             return changed_inst, max(0.0, time.time() - stop_start_time)
         else:
