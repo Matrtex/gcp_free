@@ -20,6 +20,7 @@
 - 配置防火墙规则
 - 换源、安装 dae、上传 `config.dae`
 - 远程安装流量监控脚本（iptables 监控 / 超额自动关机）
+- 启用 root 账号和 SSH 密码登录、更改 root 密码、安装 3x-ui 面板
 
 ## 快速开始（推荐）
 
@@ -72,6 +73,9 @@ gcloud auth application-default login
 .\start.ps1 switch-ip --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
 .\start.ps1 reroll-ip-amd --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --resume
 .\start.ps1 run-script --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> apt
+.\start.ps1 enable-root-login --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 change-root-password --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 install-3xui --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
 .\start.ps1 doctor --project-id <你的项目ID>
 .\start.ps1 setup --project-id <你的项目ID> --account <你的Google账号邮箱> --skip-reroll
 .\start.ps1 status --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
@@ -213,6 +217,21 @@ python scripts/build_exe.py --clean --version v1.0.0
 .\start.ps1 run-script --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区> --dry-run apt
 ```
 
+root 登录和面板安装：
+
+```powershell
+# 交互输入 root 密码；也可以先设置环境变量 GCP_FREE_ROOT_PASSWORD
+.\start.ps1 enable-root-login --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
+
+# 更改 root 密码
+.\start.ps1 change-root-password --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
+
+# 安装 3x-ui 面板
+.\start.ps1 install-3xui --project-id <你的项目ID> --account <你的Google账号邮箱> --instance <实例名> --zone <可用区>
+```
+
+`enable-root-login` 会设置 root 密码，并修改远端 SSH 配置以允许 root 密码登录。出于安全原因，命令行不提供明文密码参数；默认读取 `GCP_FREE_ROOT_PASSWORD` 环境变量，未设置时使用隐藏输入。启用 root 密码登录会扩大暴露面，请使用强密码并确认防火墙策略。
+
 防火墙规则：
 
 ```powershell
@@ -242,9 +261,14 @@ python scripts/build_exe.py --clean --version v1.0.0
 
 # 跳过刷 AMD/EPYC
 .\start.ps1 setup --project-id <你的项目ID> --skip-reroll
+
+# 创建并刷好后直接启用 root 账号和 SSH 密码登录
+$env:GCP_FREE_ROOT_PASSWORD="你的强密码"
+.\start.ps1 setup --project-id <你的项目ID> --root-login enable
 ```
 
 `setup` 会串联创建实例、刷 AMD/EPYC、防火墙、换源、安装 dae、上传 `config.dae` 和安装流量监控脚本。默认流量监控限额来自 `gcp_config.py` 的 `TRAFFIC_LIMIT_GB`。
+在交互终端中，`setup` 创建并刷好服务器后默认会询问是否启用 root 账号和 SSH 密码登录；非交互环境会跳过询问，如需启用可传 `--root-login enable`，如需明确跳过可传 `--root-login skip`。
 `setup` 默认安装的流量监控脚本仅适配 Debian；选择 `--os ubuntu` 时会在创建实例前停止，避免创建完资源后远程安装失败。
 
 > **注意**：`--zone` 是最权威的参数，传了 zone 时 `--region` 和 `--tier` 会被忽略。未传 zone 时，默认使用免费区域 `us-west1`；指定 `--tier paid` 时会自动切换到付费区域。
@@ -388,7 +412,7 @@ PowerShell 下可用下面的命令生成 Base64：
 - `gcp_instance.py`: 项目/实例查询、创建、状态轮询、外网 access config 切换、账号与项目选择
 - `gcp_reroll.py`: 刷 CPU 状态持久化、异常分类与循环逻辑
 - `gcp_firewall.py`: 防火墙与免费资源清理
-- `gcp_remote.py`: SSH/SCP、远程脚本上传执行与状态仪表盘
+- `gcp_remote.py`: SSH/SCP、远程脚本上传执行、root 登录配置、3x-ui 安装与状态仪表盘
 - `gcp_menu.py`: 交互式菜单与菜单动作
 - `gcp_cli.py`: CLI 解析、子命令和 setup 流程编排
 - `gcp_utils.py`: 通用工具函数、日志输出与基础交互辅助

@@ -174,6 +174,14 @@ bash start.sh
 .\start.ps1 status --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
 ```
 
+启用 root 登录、更改 root 密码和安装 3x-ui：
+
+```powershell
+.\start.ps1 enable-root-login --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 change-root-password --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
+.\start.ps1 install-3xui --project-id <项目ID> --account <账号邮箱> --instance <实例名> --zone <可用区>
+```
+
 一键 setup：
 
 ```powershell
@@ -240,10 +248,11 @@ ADC 凭据恢复使用临时文件加 replace 的原子写模式，避免进程�
 3. 创建实例。
 4. 默认刷 AMD / EPYC，传 `--skip-reroll` 时跳过。
 5. 配置防火墙。
-6. 远程执行 `apt` 换源脚本。
-7. 远程执行 `dae` 安装脚本。
-8. 上传并应用 `config.dae`。
-9. 安装流量监控脚本。
+6. 在交互终端中询问是否启用 root 账号和 SSH 密码登录；非交互环境可用 `--root-login enable` 显式启用，或用 `--root-login skip` 跳过。
+7. 远程执行 `apt` 换源脚本。
+8. 远程执行 `dae` 安装脚本。
+9. 上传并应用 `config.dae`。
+10. 安装流量监控脚本。
 
 setup 的原则是“资源创建前能验证的错误尽量提前失败”。例如 Ubuntu 与默认流量监控脚本不兼容时，不应先创建实例再在远程阶段失败。
 
@@ -358,6 +367,18 @@ setup 的原则是“资源创建前能验证的错误尽量提前失败”。�
 7. 删除远端临时文件。
 
 如果上传后应用命令构建失败或应用步骤失败，会额外发起 `rm -f` 清理远端临时配置文件。清理失败只告警，不覆盖原始失败结果。
+
+### root 登录和 3x-ui
+
+菜单和 CLI 额外提供三个远程动作：
+
+- `enable-root-login`：设置 root 密码，解锁 root 账号，并允许 SSH 密码登录。
+- `change-root-password`：只更改 root 密码，不调整 SSH 登录配置。
+- `install-3xui`：远程执行 `bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)` 安装 3x-ui 面板。
+
+root 密码不会通过 CLI 明文参数传入。非交互命令默认读取 `GCP_FREE_ROOT_PASSWORD` 环境变量，未设置时在交互终端中隐藏输入。涉及密码的远程动作会生成本地临时脚本并上传到 `/tmp/gcp_free_root_*.sh`，远端执行命令只包含临时路径，不包含明文密码；成功和失败路径都应尽量清理本地与远端临时文件。
+
+启用 root 密码登录会扩大暴露面，菜单和 `setup` 询问时应保留安全提醒。安装 3x-ui 使用第三方远程脚本，执行前应提示用户确认其信任该脚本来源。
 
 ## 状态文件、日志和资源路径
 

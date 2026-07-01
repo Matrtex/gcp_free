@@ -5,10 +5,13 @@ from unittest.mock import patch
 
 from gcp_models import InstanceInfo, RemoteConfig
 from gcp import (
+    build_3xui_install_command,
     build_remote_exec_command,
     build_remote_status_command,
     build_remote_upload_command,
+    build_root_account_script,
     cleanup_temp_upload_file,
+    configure_root_login,
     deploy_dae_config,
     format_traffic_limit_gb,
     prepare_local_script_for_upload,
@@ -96,6 +99,37 @@ class RemoteCommandTestCase(unittest.TestCase):
         self.assertIn("systemctl", command)
         self.assertIn("df -h /", command)
         self.assertIn("uptime", command)
+
+    def test_build_root_account_script_enables_password_login(self):
+        script = build_root_account_script("S3cret'Pass", enable_ssh_login=True)
+
+        self.assertIn("PermitRootLogin yes", script)
+        self.assertIn("PasswordAuthentication yes", script)
+        self.assertIn("sudo chpasswd", script)
+
+    def test_build_root_account_script_rejects_newline_password(self):
+        with self.assertRaises(ValueError):
+            build_root_account_script("bad\npassword")
+
+    @patch("gcp_remote.print_info")
+    def test_configure_root_login_dry_run_does_not_print_password(self, mock_print_info):
+        result = configure_root_login(
+            "demo-project",
+            self.instance,
+            RemoteConfig(method="gcloud"),
+            "Secret123!",
+            dry_run=True,
+        )
+
+        self.assertTrue(result)
+        printed_text = "\n".join(args[0] for args, _kwargs in mock_print_info.call_args_list)
+        self.assertNotIn("Secret123!", printed_text)
+
+    def test_build_3xui_install_command_uses_requested_script(self):
+        command = build_3xui_install_command()
+
+        self.assertIn("bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)", command)
+        self.assertIn("sudo bash -lc", command)
 
     def test_deploy_dae_config_cleans_remote_temp_when_apply_fails(self):
         with TemporaryDirectory() as tmp_dir:

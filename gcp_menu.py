@@ -27,9 +27,13 @@ from gcp_instance import (
     warn_if_adc_account_mismatch,
 )
 from gcp_remote import (
+    change_root_password,
+    configure_root_login,
     deploy_dae_config,
     get_remote_config_for_instance,
+    install_3xui_panel,
     prepare_instance_for_remote,
+    prompt_root_password,
     run_remote_script,
     select_traffic_monitor_script,
 )
@@ -75,6 +79,9 @@ __all__ = [
     'menu_remote_dae_action',
     'menu_deploy_dae_config_action',
     'menu_traffic_monitor_action',
+    'menu_enable_root_login_action',
+    'menu_change_root_password_action',
+    'menu_install_3xui_action',
     'menu_delete_resources_action',
     'menu_doctor_action',
     'MENU_ACTIONS',
@@ -116,6 +123,7 @@ def menu_create_action(context: Any) -> Any:
     created_instance = create_instance(context.project_id, zone, os_config)
     if created_instance:
         context.current_instance = created_instance
+        maybe_prompt_enable_root_login(context)
 
 def menu_select_instance_action(context: Any) -> Any:
     selected = select_instance(context.project_id, allow_back=True)
@@ -133,6 +141,11 @@ def prompt_yes_no(question: Any,  default: Any=True) -> Any:
 
 def prompt_optional_text(question: Any) -> Any:
     return input(f"{question}: ").strip()
+
+def maybe_prompt_enable_root_login(context: Any) -> Any:
+    print_warning("启用 root 账号和 SSH 密码登录会扩大暴露面，请使用强密码并确认防火墙策略。")
+    if prompt_yes_no("是否现在启用 root 账号和 SSH 密码登录", default=False):
+        menu_enable_root_login_action(context)
 
 def menu_login_account_action(context: Any) -> Any:
     target_account = prompt_optional_text("请输入要登录的新账号邮箱（留空则在浏览器中自行选择）")
@@ -199,6 +212,8 @@ def run_menu_reroll_mode(
             state_file=state_path,
             resume=resume,
         )
+        if context.current_instance and target_mode in {"amd", "ip_amd"}:
+            maybe_prompt_enable_root_login(context)
 
 def menu_reroll_action(context: Any) -> Any:
     run_menu_reroll_mode(
@@ -307,6 +322,38 @@ def menu_traffic_monitor_action(context: Any) -> Any:
     if script_key:
         run_remote_script(context.project_id, context.current_instance, script_key, remote_config)
 
+def menu_enable_root_login_action(context: Any) -> Any:
+    def action(project_id: Any, instance: Any, remote_config: Any) -> Any:
+        password = prompt_root_password("请输入要设置的 root 密码")
+        configure_root_login(project_id, instance, remote_config, password)
+
+    run_remote_action_for_context(
+        context,
+        "enable-root-login",
+        action,
+    )
+
+def menu_change_root_password_action(context: Any) -> Any:
+    def action(project_id: Any, instance: Any, remote_config: Any) -> Any:
+        password = prompt_root_password("请输入新的 root 密码")
+        change_root_password(project_id, instance, remote_config, password)
+
+    run_remote_action_for_context(
+        context,
+        "change-root-password",
+        action,
+    )
+
+def menu_install_3xui_action(context: Any) -> Any:
+    print_warning("3x-ui 安装脚本来自 GitHub 远程地址，执行前请确认你信任该脚本来源。")
+    if not prompt_yes_no("确认现在安装 3x-ui 面板", default=False):
+        return
+    run_remote_action_for_context(
+        context,
+        "install-3xui",
+        install_3xui_panel,
+    )
+
 def menu_delete_resources_action(context: Any) -> Any:
     current_instance = ensure_context_instance(context)
     if current_instance:
@@ -333,6 +380,9 @@ MENU_ACTIONS = [
     ActionSpec("dae", "安装 dae", None, "上传并执行 dae.sh", menu_remote_dae_action, None),
     ActionSpec("dae-config", "上传 config.dae 并启用 dae", "deploy-dae-config", "上传 dae 配置", menu_deploy_dae_config_action, None),
     ActionSpec("traffic-monitor", "安装流量监控脚本（仅适配 Debian）", None, "安装流量监控脚本", menu_traffic_monitor_action, None),
+    ActionSpec("enable-root-login", "启用 root 账号和 SSH 密码登录", "enable-root-login", "设置 root 密码并允许 SSH 密码登录", menu_enable_root_login_action, None),
+    ActionSpec("change-root-password", "更改 root 密码", "change-root-password", "远程更改 root 密码", menu_change_root_password_action, None),
+    ActionSpec("install-3xui", "安装 3x-ui 面板", "install-3xui", "执行 3x-ui 官方安装脚本", menu_install_3xui_action, None),
     ActionSpec("delete-resources", "删除当前资源", "delete-resources", "删除实例、磁盘和规则", menu_delete_resources_action, None),
     ActionSpec("doctor", "环境预检", "doctor", "检查本地与云端运行环境", menu_doctor_action, None),
 ]

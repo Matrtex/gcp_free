@@ -33,6 +33,9 @@ from gcp import (
     handle_login_account_cli,
     handle_switch_account_cli,
     handle_switch_ip_cli,
+    handle_enable_root_login_cli,
+    handle_change_root_password_cli,
+    handle_install_3xui_cli,
     handle_firewall_cli,
     handle_reroll_ip_amd_cli,
     handle_reroll_ip_cli,
@@ -1229,6 +1232,42 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(args.account, "new@example.com")
         self.assertTrue(args.no_browser)
 
+    def test_root_and_3xui_cli_commands_parse(self):
+        enable_args = parse_args([
+            "enable-root-login",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+            "--password-env",
+            "ROOT_PASS",
+        ])
+        change_args = parse_args([
+            "change-root-password",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+        ])
+        xui_args = parse_args([
+            "install-3xui",
+            "--project-id",
+            "demo-project",
+            "--instance",
+            "vm-1",
+            "--zone",
+            "us-west1-a",
+        ])
+
+        self.assertIs(enable_args.handler, handle_enable_root_login_cli)
+        self.assertEqual(enable_args.password_env, "ROOT_PASS")
+        self.assertIs(change_args.handler, handle_change_root_password_cli)
+        self.assertIs(xui_args.handler, handle_install_3xui_cli)
+
     def test_classify_reroll_exception_distinguishes_oauth_and_instance_stuck(self):
         oauth_exc = RuntimeError(
             "获取实例 vm-1 状态 在 4 次尝试后仍失败: "
@@ -1971,6 +2010,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             instance_name="vm-1",
             skip_reroll=True,
             traffic_script="net_iptables",
+            root_login="skip",
             dry_run=False,
         )
 
@@ -1978,6 +2018,52 @@ class GcpHelpersTestCase(unittest.TestCase):
 
         mock_reroll_cpu_loop.assert_not_called()
         self.assertEqual(mock_run_setup_remote_step.call_count, 4)
+
+    @patch("gcp_cli.get_password_from_env_or_prompt", return_value="Secret123!")
+    @patch("gcp_cli.run_setup_remote_step", side_effect=lambda _args, inst, _remote, _name, _action: inst)
+    @patch("gcp_cli.build_remote_config_from_args", return_value=SimpleNamespace(method="gcloud"))
+    @patch("gcp_cli.configure_firewall_non_interactive")
+    @patch("gcp_cli.reroll_cpu_loop")
+    @patch("gcp_cli.create_instance")
+    def test_handle_setup_cli_root_login_enable_adds_root_step(
+        self,
+        mock_create_instance,
+        mock_reroll_cpu_loop,
+        _mock_configure_firewall,
+        _mock_build_remote_config,
+        mock_run_setup_remote_step,
+        mock_get_password,
+    ):
+        instance = InstanceInfo(
+            name="vm-1",
+            zone="us-west1-a",
+            status="RUNNING",
+            cpu_platform="Intel Broadwell",
+            network="global/networks/default",
+            internal_ip="10.0.0.2",
+            external_ip="35.1.2.3",
+        )
+        mock_create_instance.return_value = instance
+        mock_reroll_cpu_loop.return_value = instance
+        args = SimpleNamespace(
+            project_id="demo-project",
+            zone="us-west1-a",
+            region="us-west1",
+            os="debian-12",
+            instance_name="vm-1",
+            skip_reroll=False,
+            traffic_script="net_iptables",
+            root_login="enable",
+            root_password_env="ROOT_PASS",
+            dry_run=False,
+        )
+
+        handle_setup_cli(args)
+
+        step_names = [call_item.args[3] for call_item in mock_run_setup_remote_step.call_args_list]
+        self.assertIn("启用 root 账号和 SSH 密码登录", step_names)
+        self.assertEqual(mock_run_setup_remote_step.call_count, 5)
+        mock_get_password.assert_called_once_with("ROOT_PASS", "请输入要设置的 root 密码")
 
     @patch("gcp_cli.run_setup_remote_step", side_effect=lambda _args, inst, _remote, _name, _action: inst)
     @patch("gcp_cli.build_remote_config_from_args", return_value=SimpleNamespace(method="gcloud"))
@@ -2011,6 +2097,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             instance_name="vm-1",
             skip_reroll=False,
             traffic_script="net_iptables",
+            root_login="skip",
             dry_run=False,
         )
 
@@ -2028,6 +2115,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             instance_name="vm-1",
             skip_reroll=True,
             traffic_script="net_iptables",
+            root_login="skip",
             dry_run=False,
         )
 

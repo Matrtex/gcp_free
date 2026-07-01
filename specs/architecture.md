@@ -73,6 +73,17 @@ gcp.py
 - 未显式传 `--access-config-name` 时应优先探测现有 access config 名称，探测失败时再回退 `external-nat`。
 - 新增临时外网 IP 的 `network tier` 默认保持 `STANDARD`，避免与创建实例时的默认配置不一致。
 
+## 远程运维动作
+
+启用 root 账号、修改 root 密码和安装 3x-ui 属于远程运维动作，实际行为应放在 `gcp_remote.py`，再由 `gcp_cli.py` 和 `gcp_menu.py` 编排入口。
+
+维护约束：
+
+- 菜单和 CLI 动作表都应提供 `enable-root-login`、`change-root-password` 和 `install-3xui`。
+- `setup` 可在创建并刷好服务器后询问是否启用 root 账号和 SSH 密码登录；非交互环境不得强制等待输入，应允许 `--root-login enable|skip` 明确控制。
+- root 密码不得通过命令行参数传递；如需非交互输入，应使用环境变量并在远程执行前转入敏感临时脚本。
+- 安装 3x-ui 会执行第三方远程脚本，菜单路径必须提示用户确认信任脚本来源。
+
 ## 兼容层约束
 
 `gcp_app.py` 仍然承担历史兼容职责，因此允许星号导入。新增业务时不要把逻辑写入 `gcp_app.py`，应写入职责模块，再由 `gcp_app.py` 聚合暴露。

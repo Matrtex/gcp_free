@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+
 from gcp_common import (
     Any,
     InstanceInfo,
@@ -19,6 +21,7 @@ from gcp_common import (
     resolve_asset_path,
     shutil,
     subprocess,
+    sys,
     tempfile,
     time,
 )
@@ -51,7 +54,9 @@ __all__ = [
     'render_local_script_content',
     'prepare_local_script_for_upload',
     'cleanup_temp_upload_file',
+    'prepare_temp_script_content',
     'build_remote_script_exec_command',
+    'run_remote_generated_script',
     'run_subprocess_command',
     'run_subprocess_capture_command',
     'build_remote_exec_command',
@@ -65,9 +70,19 @@ __all__ = [
     'run_remote_script',
     'select_traffic_monitor_script',
     'deploy_dae_config',
+    'validate_root_password',
+    'prompt_root_password',
+    'get_password_from_env_or_prompt',
+    'build_root_account_script',
+    'configure_root_login',
+    'change_root_password',
+    'build_3xui_install_command',
+    'install_3xui_panel',
     'build_remote_status_command',
     'show_remote_status',
 ]
+
+DEFAULT_ROOT_PASSWORD_ENV = "GCP_FREE_ROOT_PASSWORD"
 
 def prepare_instance_for_remote(project_id: Any,  instance_info: Any,  remote_config: Any) -> Any:
     refreshed = refresh_instance_info(project_id, instance_info, announce=True)
@@ -187,6 +202,28 @@ def prepare_local_script_for_upload(script_key: Any,  traffic_limit_gb: Any=TRAF
         temp_file.close()
     return temp_path, local_script
 
+def prepare_temp_script_content(script_content: Any,  suffix: str = "_generated.sh") -> Any:
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        suffix=suffix,
+        delete=False,
+    )
+    try:
+        temp_file.write(str(script_content))
+        return temp_file.name
+    finally:
+        temp_file.close()
+
+def cleanup_local_temp_file(upload_path: Any) -> Any:
+    if not upload_path:
+        return
+    try:
+        os.remove(upload_path)
+    except OSError as exc:
+        print_warning(f"清理本地临时脚本失败: {summarize_exception(exc)}")
+
 def cleanup_temp_upload_file(upload_path: Any,  source_path: Any) -> Any:
     if not source_path or not upload_path or upload_path == source_path:
         return
@@ -229,6 +266,67 @@ def cleanup_remote_temp_path(
         timeout=REMOTE_COMMAND_TIMEOUT,
         dry_run=dry_run,
     )
+
+def run_remote_generated_script(
+    project_id: Any,
+    instance_info: Any,
+    remote_config: Any,
+    script_content: Any,
+    action_desc: str,
+    remote_prefix: str = "gcp_free_action",
+    timeout: Any = REMOTE_COMMAND_TIMEOUT,
+    dry_run: bool = False,
+    sensitive: bool = False,
+) -> Any:
+    if dry_run and sensitive:
+        print_info(f"[dry-run] {action_desc}")
+        print_info("[dry-run] 将上传临时脚本并远程执行，敏感脚本内容不打印。")
+        return True
+
+    upload_script = prepare_temp_script_content(script_content, suffix=f"_{remote_prefix}.sh")
+    remote_tmp = make_remote_temp_path(remote_prefix, ".sh")
+    cleanup_needed = False
+    try:
+        upload_cmd = build_remote_upload_command(
+            project_id,
+            instance_info,
+            remote_config,
+            upload_script,
+            remote_tmp,
+        )
+        if not upload_cmd:
+            return False
+
+        print_info(f"正在上传{action_desc}临时脚本...")
+        if not run_subprocess_command(
+            upload_cmd,
+            f"上传{action_desc}临时脚本",
+            timeout=REMOTE_UPLOAD_TIMEOUT,
+            dry_run=dry_run,
+        ):
+            return False
+        cleanup_needed = not dry_run
+
+        remote_command = build_remote_script_exec_command(remote_tmp)
+        exec_cmd = build_remote_exec_command(project_id, instance_info, remote_config, remote_command)
+        if not exec_cmd:
+            return False
+
+        print_info(f"正在远程执行{action_desc}...")
+        if not run_subprocess_command(
+            exec_cmd,
+            action_desc,
+            timeout=timeout,
+            dry_run=dry_run,
+        ):
+            return False
+        cleanup_needed = False
+        print_success(f"{action_desc}完成。")
+        return True
+    finally:
+        cleanup_local_temp_file(upload_script)
+        if cleanup_needed:
+            cleanup_remote_temp_path(project_id, instance_info, remote_config, remote_tmp, dry_run=dry_run)
 
 def run_subprocess_command(cmd: Any,  action_desc: Any,  timeout: Any=None,  dry_run: Any=False) -> Any:
     if dry_run:
@@ -586,6 +684,153 @@ def deploy_dae_config(project_id: str,  instance_info: InstanceInfo,  remote_con
     finally:
         if cleanup_needed:
             cleanup_remote_temp_path(project_id, instance_info, remote_config, remote_tmp, dry_run=dry_run)
+
+def validate_root_password(password: Any) -> str:
+    password_text = str(password or "")
+    if not password_text:
+        raise ValueError("root 密码不能为空。")
+    if "\n" in password_text or "\r" in password_text:
+        raise ValueError("root 密码不能包含换行符。")
+    return password_text
+
+def prompt_root_password(prompt_title: str = "请输入 root 密码") -> str:
+    while True:
+        password = getpass.getpass(f"{prompt_title}: ")
+        confirm = getpass.getpass("请再次输入 root 密码: ")
+        if password != confirm:
+            print_warning("两次输入的密码不一致，请重新输入。")
+            continue
+        return validate_root_password(password)
+
+def get_password_from_env_or_prompt(
+    env_name: Any = DEFAULT_ROOT_PASSWORD_ENV,
+    prompt_title: str = "请输入 root 密码",
+) -> str:
+    env_key = str(env_name or DEFAULT_ROOT_PASSWORD_ENV).strip() or DEFAULT_ROOT_PASSWORD_ENV
+    env_password = os.environ.get(env_key)
+    if env_password:
+        return validate_root_password(env_password)
+    if not sys.stdin.isatty():
+        raise ValueError(f"未提供 root 密码。请设置环境变量 {env_key}，或在交互终端运行。")
+    return prompt_root_password(prompt_title)
+
+def build_root_account_script(password: Any,  enable_ssh_login: bool = True) -> str:
+    password_text = validate_root_password(password)
+    enable_ssh_value = "1" if enable_ssh_login else "0"
+    quoted_password = shlex.quote(password_text)
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_PASSWORD={quoted_password}
+ENABLE_SSH_LOGIN={enable_ssh_value}
+
+printf 'root:%s\\n' "$ROOT_PASSWORD" | sudo chpasswd
+sudo passwd -u root >/dev/null 2>&1 || true
+sudo usermod -s /bin/bash root >/dev/null 2>&1 || true
+
+if [ "$ENABLE_SSH_LOGIN" = "1" ]; then
+  sudo mkdir -p /etc/ssh/sshd_config.d
+  sudo tee /etc/ssh/sshd_config.d/99-gcp-free-root-login.conf >/dev/null <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+EOF
+
+  ensure_sshd_option() {{
+    local key="$1"
+    local value="$2"
+    local file="/etc/ssh/sshd_config"
+    if [ ! -f "$file" ]; then
+      return 0
+    fi
+    if sudo grep -Eiq "^[#[:space:]]*$key[[:space:]]+" "$file"; then
+      sudo sed -i -E "s|^[#[:space:]]*$key[[:space:]].*|$key $value|I" "$file"
+    else
+      printf '%s %s\\n' "$key" "$value" | sudo tee -a "$file" >/dev/null
+    fi
+  }}
+
+  ensure_sshd_option PermitRootLogin yes
+  ensure_sshd_option PasswordAuthentication yes
+  ensure_sshd_option KbdInteractiveAuthentication yes
+
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null
+  else
+    sudo service ssh restart 2>/dev/null || sudo service sshd restart 2>/dev/null
+  fi
+fi
+"""
+
+def configure_root_login(
+    project_id: str,
+    instance_info: InstanceInfo,
+    remote_config: RemoteConfig,
+    password: Any,
+    dry_run: bool = False,
+) -> bool:
+    script_content = build_root_account_script(password, enable_ssh_login=True)
+    return run_remote_generated_script(
+        project_id,
+        instance_info,
+        remote_config,
+        script_content,
+        "启用 root 账号和 SSH 密码登录",
+        remote_prefix="gcp_free_root_login",
+        timeout=REMOTE_CONFIG_APPLY_TIMEOUT,
+        dry_run=dry_run,
+        sensitive=True,
+    )
+
+def change_root_password(
+    project_id: str,
+    instance_info: InstanceInfo,
+    remote_config: RemoteConfig,
+    password: Any,
+    dry_run: bool = False,
+) -> bool:
+    script_content = build_root_account_script(password, enable_ssh_login=False)
+    return run_remote_generated_script(
+        project_id,
+        instance_info,
+        remote_config,
+        script_content,
+        "更改 root 密码",
+        remote_prefix="gcp_free_root_password",
+        timeout=REMOTE_CONFIG_APPLY_TIMEOUT,
+        dry_run=dry_run,
+        sensitive=True,
+    )
+
+def build_3xui_install_command() -> str:
+    return (
+        "set -e;"
+        "if ! command -v curl >/dev/null 2>&1; then "
+        "sudo apt-get update && sudo apt-get install -y curl; "
+        "fi;"
+        "sudo bash -lc 'bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)'"
+    )
+
+def install_3xui_panel(
+    project_id: str,
+    instance_info: InstanceInfo,
+    remote_config: RemoteConfig,
+    dry_run: bool = False,
+) -> bool:
+    exec_cmd = build_remote_exec_command(
+        project_id,
+        instance_info,
+        remote_config,
+        build_3xui_install_command(),
+    )
+    if not exec_cmd:
+        return False
+    return run_subprocess_command(
+        exec_cmd,
+        "安装 3x-ui 面板",
+        timeout=REMOTE_COMMAND_TIMEOUT,
+        dry_run=dry_run,
+    )
 
 def build_remote_status_command() -> str:
     return (

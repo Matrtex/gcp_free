@@ -27,7 +27,7 @@
 - 通过 stop/start 循环刷到 AMD / EPYC CPU。
 - 通过 stop/start 循环刷新外网 IP，或同时刷 IP + AMD / EPYC。
 - 不停机删除并重建外网 access config，为运行中的实例重新分配临时外网 IP。
-- 远程执行换源、安装 `dae`、上传 `config.dae`、部署流量监控脚本。
+- 远程执行换源、安装 `dae`、上传 `config.dae`、部署流量监控脚本、启用 root 账号和 SSH 密码登录、更改 root 密码、安装 3x-ui 面板。
 - 在多账号 / 多项目环境下，保证 `gcloud` 活跃账号与 ADC（Application Default Credentials）一致，减少串账号和 403 问题。
 
 ## 运行前提
@@ -64,7 +64,7 @@
 - `gcp_menu.py` 通过 `MENU_ACTIONS` 维护交互菜单动作列表。菜单动作表与 CLI 动作表相互独立，避免 `gcp_cli.py` 和 `gcp_menu.py` 形成循环导入。
 - `build_arg_parser()` 负责定义所有子命令。
 - `run_cli()` 负责执行 handler，并在必要时先调用 `prepare_cli_account_context()` 校验账号上下文。
-- `handle_setup_cli()` 是最高层编排入口，会把创建实例、刷 CPU、防火墙、换源、安装 `dae`、上传配置、安装流量监控串成一个工作流。
+- `handle_setup_cli()` 是最高层编排入口，会把创建实例、刷 CPU、防火墙、可选启用 root 登录、换源、安装 `dae`、上传配置、安装流量监控串成一个工作流。
 
 ## 模块职责
 
@@ -81,7 +81,7 @@
 - `gcp_instance.py`：实例查询、创建、状态轮询、外网 access config 切换、账号与项目选择。
 - `gcp_reroll.py`：刷 CPU / IP 的循环逻辑、状态恢复、异常分类。
 - `gcp_firewall.py`：防火墙规则和免费资源清理。
-- `gcp_remote.py`：SSH / `gcloud compute ssh`、SCP / `gcloud compute scp`、远程脚本执行和状态面板。
+- `gcp_remote.py`：SSH / `gcloud compute ssh`、SCP / `gcloud compute scp`、远程脚本执行、root 登录配置、3x-ui 安装和状态面板。
 - `gcp_doctor.py`：环境体检，检查工具、账号、API、脚本目录、资源文件和可写目录。
 - `gcp_ips.py`：下载并更新 GCP 区域 IP 段文件。
 
@@ -131,6 +131,8 @@
 - 若使用 SSH 且传入 `--ssh-key`，会先校验私钥文件是否存在。
 - 远程执行前会等待实例就绪；实例未就绪时不会盲目继续。
 - 上传到远端 `/tmp` 的临时脚本或配置文件必须覆盖成功和失败路径清理；清理失败只告警，不覆盖原始失败结果。
+- 启用 root 登录和更改 root 密码不得把明文密码写入命令行参数或日志；默认从 `GCP_FREE_ROOT_PASSWORD` 环境变量读取，未设置时隐藏输入，并通过敏感临时脚本远程执行。
+- 安装 3x-ui 使用第三方远程脚本，菜单路径必须提示用户确认信任脚本来源。
 - 本地临时上传文件清理失败也只告警，不覆盖原始远程执行结果。
 - `switch-ip` / `reroll-ip --method access-config` 是本地 `gcloud compute instances *-access-config` 网络配置变更，不属于远程执行；它要求实例为 `RUNNING`，不会停止实例，也不会写入刷机状态文件，但外部连接会在 access config 重建期间短暂断开。
 
@@ -138,6 +140,7 @@
 
 - `setup` 是高层工作流，不是独立实现；其本质是依次调用已有能力。
 - 默认会执行刷 AMD / EPYC；传 `--skip-reroll` 时跳过。
+- 在交互终端中，`setup` 创建并刷好服务器后默认询问是否启用 root 账号和 SSH 密码登录；非交互环境默认跳过，可用 `--root-login enable` 显式启用。
 - 流量监控脚本默认只支持 Debian。
 - 如果用户在 `setup` 中选择 `--os ubuntu`，流程会在创建实例前直接停止，避免资源创建完成后远程脚本阶段失败。
 

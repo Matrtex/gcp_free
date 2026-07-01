@@ -3,17 +3,18 @@ from __future__ import annotations
 from gcp_common import (
     ActionSpec,
     Any,
+    DEFAULT_GCP_IP_RANGES_FILE,
     InstanceInfo,
     LOCAL_SCRIPT_FILES,
     Namespace,
     REGION_OPTIONS,
     RemoteConfig,
     argparse,
-    DEFAULT_GCP_IP_RANGES_FILE,
     find_gcloud_command,
     getpass,
     os,
     shutil,
+    sys,
     update_gcp_ip_ranges_file,
 )
 from gcp_firewall import (
@@ -45,7 +46,10 @@ from gcp_menu import (
     menu_delete_resources_action,
     menu_deploy_dae_config_action,
     menu_doctor_action,
+    menu_enable_root_login_action,
     menu_firewall_action,
+    menu_change_root_password_action,
+    menu_install_3xui_action,
     menu_login_account_action,
     menu_remote_apt_action,
     menu_remote_dae_action,
@@ -59,7 +63,12 @@ from gcp_menu import (
     menu_traffic_monitor_action,
 )
 from gcp_remote import (
+    DEFAULT_ROOT_PASSWORD_ENV,
+    change_root_password,
+    configure_root_login,
     deploy_dae_config,
+    get_password_from_env_or_prompt,
+    install_3xui_panel,
     prepare_instance_for_remote,
     run_remote_script,
     show_remote_status,
@@ -99,6 +108,9 @@ __all__ = [
     'handle_firewall_cli',
     'handle_run_script_cli',
     'handle_deploy_dae_config_cli',
+    'handle_enable_root_login_cli',
+    'handle_change_root_password_cli',
+    'handle_install_3xui_cli',
     'handle_delete_resources_cli',
     'handle_doctor_cli',
     'handle_show_reroll_state_cli',
@@ -394,6 +406,46 @@ def handle_deploy_dae_config_cli(args: Namespace) -> None:
     ):
         raise RuntimeError("dae 配置部署失败。")
 
+def handle_enable_root_login_cli(args: Namespace) -> None:
+    remote_instance, remote_config = prepare_cli_remote_instance(args)
+    password = "dry-run-placeholder" if args.dry_run else get_password_from_env_or_prompt(
+        getattr(args, "password_env", DEFAULT_ROOT_PASSWORD_ENV),
+        "请输入要设置的 root 密码",
+    )
+    if not configure_root_login(
+        args.project_id,
+        remote_instance,
+        remote_config,
+        password,
+        dry_run=args.dry_run,
+    ):
+        raise RuntimeError("启用 root 账号和 SSH 密码登录失败。")
+
+def handle_change_root_password_cli(args: Namespace) -> None:
+    remote_instance, remote_config = prepare_cli_remote_instance(args)
+    password = "dry-run-placeholder" if args.dry_run else get_password_from_env_or_prompt(
+        getattr(args, "password_env", DEFAULT_ROOT_PASSWORD_ENV),
+        "请输入新的 root 密码",
+    )
+    if not change_root_password(
+        args.project_id,
+        remote_instance,
+        remote_config,
+        password,
+        dry_run=args.dry_run,
+    ):
+        raise RuntimeError("更改 root 密码失败。")
+
+def handle_install_3xui_cli(args: Namespace) -> None:
+    remote_instance, remote_config = prepare_cli_remote_instance(args)
+    if not install_3xui_panel(
+        args.project_id,
+        remote_instance,
+        remote_config,
+        dry_run=args.dry_run,
+    ):
+        raise RuntimeError("安装 3x-ui 面板失败。")
+
 def handle_delete_resources_cli(args: Namespace) -> None:
     if not args.yes:
         raise ValueError("非交互删除资源时必须显式传入 --yes。")
@@ -464,6 +516,22 @@ def validate_setup_options(os_config: Any, traffic_script: Any) -> None:
         "请改用 --os debian-12，或先单独创建 Ubuntu 实例后不要安装该流量监控脚本。"
     )
 
+def should_enable_root_login_during_setup(args: Any) -> bool:
+    mode = str(getattr(args, "root_login", "ask") or "ask").strip().lower()
+    if mode == "skip":
+        return False
+    if mode == "enable":
+        return True
+    if getattr(args, "dry_run", False):
+        print_info("[dry-run] setup 创建并刷好后会询问是否启用 root 账号和 SSH 密码登录。")
+        return False
+    if not sys.stdin.isatty():
+        print_info("setup: 当前不是交互终端，已跳过 root 登录询问；如需启用请传 --root-login enable。")
+        return False
+    print_warning("启用 root 账号和 SSH 密码登录会扩大暴露面，请使用强密码并确认防火墙策略。")
+    choice = input("setup: 是否启用 root 账号和 SSH 密码登录? (y/N): ").strip().lower()
+    return choice in {"y", "yes"}
+
 def handle_setup_cli(args: Namespace) -> None:
     zone = resolve_zone_for_create(args.zone, args.region, getattr(args, "tier", None))
     os_config = resolve_os_config(args.os)
@@ -503,6 +571,25 @@ def handle_setup_cli(args: Namespace) -> None:
         )
 
     remote_config = build_remote_config_from_args(args)
+    if should_enable_root_login_during_setup(args):
+        password = "dry-run-placeholder" if args.dry_run else get_password_from_env_or_prompt(
+            getattr(args, "root_password_env", DEFAULT_ROOT_PASSWORD_ENV),
+            "请输入要设置的 root 密码",
+        )
+        instance_info = run_setup_remote_step(
+            args,
+            instance_info,
+            remote_config,
+            "启用 root 账号和 SSH 密码登录",
+            lambda inst: configure_root_login(
+                args.project_id,
+                inst,
+                remote_config,
+                password,
+                dry_run=args.dry_run,
+            ),
+        )
+
     for step_name, action in [
         ("Debian/Ubuntu 换源", lambda inst: run_remote_script(args.project_id, inst, "apt", remote_config, dry_run=args.dry_run)),
         ("安装 dae", lambda inst: run_remote_script(args.project_id, inst, "dae", remote_config, dry_run=args.dry_run)),
@@ -531,6 +618,9 @@ ACTION_SPECS = [
     ActionSpec("dae", "安装 dae", None, "上传并执行 dae.sh", menu_remote_dae_action, None),
     ActionSpec("dae-config", "上传 config.dae 并启用 dae", "deploy-dae-config", "上传 dae 配置", menu_deploy_dae_config_action, handle_deploy_dae_config_cli),
     ActionSpec("traffic-monitor", "安装流量监控脚本（仅适配 Debian）", None, "安装流量监控脚本", menu_traffic_monitor_action, None),
+    ActionSpec("enable-root-login", "启用 root 账号和 SSH 密码登录", "enable-root-login", "设置 root 密码并允许 SSH 密码登录", menu_enable_root_login_action, handle_enable_root_login_cli),
+    ActionSpec("change-root-password", "更改 root 密码", "change-root-password", "远程更改 root 密码", menu_change_root_password_action, handle_change_root_password_cli),
+    ActionSpec("install-3xui", "安装 3x-ui 面板", "install-3xui", "执行 3x-ui 官方安装脚本", menu_install_3xui_action, handle_install_3xui_cli),
     ActionSpec("delete-resources", "删除当前资源", "delete-resources", "删除实例、磁盘和规则", menu_delete_resources_action, handle_delete_resources_cli),
     ActionSpec("doctor", "环境预检", "doctor", "检查本地与云端运行环境", menu_doctor_action, handle_doctor_cli),
 ]
@@ -769,6 +859,37 @@ def build_arg_parser() -> Any:
     )
     dae_config_parser.set_defaults(handler=ACTION_SPEC_MAP["dae-config"].cli_handler)
 
+    enable_root_parser = subparsers.add_parser(
+        "enable-root-login",
+        parents=[instance_parent, remote_parent],
+        help=ACTION_SPEC_MAP["enable-root-login"].description,
+    )
+    enable_root_parser.add_argument(
+        "--password-env",
+        default=DEFAULT_ROOT_PASSWORD_ENV,
+        help=f"读取 root 密码的环境变量名，默认 {DEFAULT_ROOT_PASSWORD_ENV}；未设置时交互输入",
+    )
+    enable_root_parser.set_defaults(handler=ACTION_SPEC_MAP["enable-root-login"].cli_handler)
+
+    change_root_password_parser = subparsers.add_parser(
+        "change-root-password",
+        parents=[instance_parent, remote_parent],
+        help=ACTION_SPEC_MAP["change-root-password"].description,
+    )
+    change_root_password_parser.add_argument(
+        "--password-env",
+        default=DEFAULT_ROOT_PASSWORD_ENV,
+        help=f"读取新 root 密码的环境变量名，默认 {DEFAULT_ROOT_PASSWORD_ENV}；未设置时交互输入",
+    )
+    change_root_password_parser.set_defaults(handler=ACTION_SPEC_MAP["change-root-password"].cli_handler)
+
+    install_3xui_parser = subparsers.add_parser(
+        "install-3xui",
+        parents=[instance_parent, remote_parent],
+        help=ACTION_SPEC_MAP["install-3xui"].description,
+    )
+    install_3xui_parser.set_defaults(handler=ACTION_SPEC_MAP["install-3xui"].cli_handler)
+
     status_parser = subparsers.add_parser(
         "status",
         parents=[instance_parent, remote_parent],
@@ -806,6 +927,17 @@ def build_arg_parser() -> Any:
         choices=["net_iptables", "net_shutdown"],
         default="net_iptables",
         help="setup 最后安装的流量监控脚本，默认 net_iptables",
+    )
+    setup_parser.add_argument(
+        "--root-login",
+        choices=["ask", "enable", "skip"],
+        default="ask",
+        help="setup 创建并刷好后是否启用 root 账号和 SSH 密码登录，默认 ask",
+    )
+    setup_parser.add_argument(
+        "--root-password-env",
+        default=DEFAULT_ROOT_PASSWORD_ENV,
+        help=f"setup 启用 root 登录时读取密码的环境变量名，默认 {DEFAULT_ROOT_PASSWORD_ENV}",
     )
     setup_parser.set_defaults(handler=handle_setup_cli)
 
