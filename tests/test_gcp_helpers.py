@@ -646,7 +646,7 @@ class GcpHelpersTestCase(unittest.TestCase):
             had_exception=True,
             stop_wait_seconds=0,
             exception_kind="oauth_timeout",
-            consecutive_oauth_timeouts=4,
+            consecutive_auth_timeouts=4,
         )
         self.assertEqual(cooldown, 90)
         self.assertIn("熔断", reason)
@@ -1590,12 +1590,12 @@ class GcpHelpersTestCase(unittest.TestCase):
         self.assertEqual(oauth_kind, "oauth_timeout")
         self.assertEqual(compute_kind, "compute_timeout")
         self.assertEqual(hard_kind, "hard_failure")
-        self.assertEqual(stats.oauth_timeout_count, 1)
+        self.assertEqual(stats.auth_timeout_count, 1)
         self.assertEqual(stats.compute_timeout_count, 1)
         self.assertEqual(stats.hard_failure_count, 1)
         self.assertEqual(get_soft_exception_count(stats), 2)
         self.assertEqual(stats.exception_count, 3)
-        self.assertEqual(stats.consecutive_oauth_timeouts, 0)
+        self.assertEqual(stats.consecutive_auth_timeouts, 0)
 
     @patch("gcp_instance.sleep_and_detect_pause", return_value=0)
     @patch("gcp_instance.get_instance_with_retry")

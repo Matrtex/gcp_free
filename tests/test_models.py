@@ -44,7 +44,8 @@ class ModelsTestCase(unittest.TestCase):
         self.assertEqual(payload["initial_external_ip"], "35.1.2.3")
         self.assertEqual(payload["success_external_ip"], "35.4.5.6")
         self.assertEqual(payload["last_cpu"], "AMD EPYC Milan")
-        self.assertEqual(payload["oauth_timeout_count"], 0)
+        self.assertEqual(payload["auth_timeout_count"], 0)
+        self.assertNotIn("oauth_timeout_count", payload)
 
     def test_reroll_stats_roundtrip(self):
         stats = RerollStats(
@@ -54,11 +55,11 @@ class ModelsTestCase(unittest.TestCase):
             start_time=123.0,
             attempts=9,
             exception_count=2,
-            oauth_timeout_count=1,
+            auth_timeout_count=1,
             compute_timeout_count=0,
             instance_stuck_count=1,
             hard_failure_count=0,
-            consecutive_oauth_timeouts=0,
+            consecutive_auth_timeouts=0,
             target_mode="ip_amd",
             initial_external_ip="35.1.2.3",
             last_external_ip="35.4.5.6",
@@ -76,6 +77,21 @@ class ModelsTestCase(unittest.TestCase):
         restored = RerollStats.from_dict(stats.to_dict())
 
         self.assertEqual(restored, stats)
+
+    def test_reroll_stats_reads_legacy_auth_timeout_keys(self):
+        payload = {
+            "project_id": "demo-project",
+            "instance_name": "test-vm",
+            "zone": "us-west1-a",
+            "start_time": 123.0,
+            "oauth_timeout_count": 2,
+            "consecutive_oauth_timeouts": 1,
+        }
+
+        restored = RerollStats.from_dict(payload)
+
+        self.assertEqual(restored.auth_timeout_count, 2)
+        self.assertEqual(restored.consecutive_auth_timeouts, 1)
 
 
 if __name__ == "__main__":

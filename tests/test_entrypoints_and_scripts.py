@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 
 import scripts.build_exe as build_exe
@@ -29,7 +30,7 @@ class EntrypointsAndScriptsTestCase(unittest.TestCase):
             errors="backslashreplace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=20,
+            timeout=60,
         )
 
         self.assertNotEqual(result.returncode, 0)

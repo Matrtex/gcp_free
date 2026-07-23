@@ -225,7 +225,7 @@ def print_reroll_progress(stats: Any,  state_path: Any) -> Any:
     )
 
 def get_soft_exception_count(stats: Any) -> Any:
-    return stats.oauth_timeout_count + stats.compute_timeout_count + stats.instance_stuck_count
+    return stats.auth_timeout_count + stats.compute_timeout_count + stats.instance_stuck_count
 
 def get_legacy_exception_count(stats: Any) -> Any:
     classified = get_soft_exception_count(stats) + stats.hard_failure_count
@@ -233,8 +233,8 @@ def get_legacy_exception_count(stats: Any) -> Any:
 
 def format_exception_breakdown(stats: Any) -> Any:
     parts = []
-    if stats.oauth_timeout_count:
-        parts.append(f"OAuth 超时 {stats.oauth_timeout_count}")
+    if stats.auth_timeout_count:
+        parts.append(f"OAuth 超时 {stats.auth_timeout_count}")
     if stats.compute_timeout_count:
         parts.append(f"Compute 超时 {stats.compute_timeout_count}")
     if stats.instance_stuck_count:
@@ -349,10 +349,10 @@ def recalculate_exception_count(stats: Any) -> Any:
 def record_reroll_exception(stats: Any,  exc: Any) -> Any:
     exception_kind = classify_reroll_exception(exc)
     if exception_kind == "oauth_timeout":
-        stats.oauth_timeout_count += 1
-        stats.consecutive_oauth_timeouts += 1
+        stats.auth_timeout_count += 1
+        stats.consecutive_auth_timeouts += 1
     else:
-        stats.consecutive_oauth_timeouts = 0
+        stats.consecutive_auth_timeouts = 0
         if exception_kind == "compute_timeout":
             stats.compute_timeout_count += 1
         elif exception_kind == "instance_stuck":
@@ -372,21 +372,21 @@ def record_reroll_exception(stats: Any,  exc: Any) -> Any:
     )
     return exception_kind, summarized_error
 
-def get_oauth_circuit_breaker_cooldown(consecutive_oauth_timeouts: Any) -> Any:
-    if consecutive_oauth_timeouts < OAUTH_CIRCUIT_BREAKER_THRESHOLD:
+def get_oauth_circuit_breaker_cooldown(consecutive_auth_timeouts: Any) -> Any:
+    if consecutive_auth_timeouts < OAUTH_CIRCUIT_BREAKER_THRESHOLD:
         return 0
-    extra_steps = consecutive_oauth_timeouts - OAUTH_CIRCUIT_BREAKER_THRESHOLD
+    extra_steps = consecutive_auth_timeouts - OAUTH_CIRCUIT_BREAKER_THRESHOLD
     cooldown = OAUTH_CIRCUIT_BREAKER_BASE_COOLDOWN + (extra_steps * OAUTH_CIRCUIT_BREAKER_STEP_COOLDOWN)
     return min(OAUTH_CIRCUIT_BREAKER_MAX_COOLDOWN, cooldown)
 
-def get_reroll_cooldown_policy( had_exception: Any=False,  stop_wait_seconds: Any=0,  exception_kind: Any=None,  consecutive_oauth_timeouts: Any=0,  ) -> Any:
+def get_reroll_cooldown_policy( had_exception: Any=False,  stop_wait_seconds: Any=0,  exception_kind: Any=None,  consecutive_auth_timeouts: Any=0,  ) -> Any:
     # 正常轮次尽量快刷；只有异常时才放大退避，避免把 502/409 频率继续顶高。
     if exception_kind == "oauth_timeout":
-        breaker_cooldown = get_oauth_circuit_breaker_cooldown(consecutive_oauth_timeouts)
+        breaker_cooldown = get_oauth_circuit_breaker_cooldown(consecutive_auth_timeouts)
         if breaker_cooldown > 0:
             return (
                 breaker_cooldown,
-                f"连续 {consecutive_oauth_timeouts} 轮 OAuth 超时，触发认证链路熔断",
+                f"连续 {consecutive_auth_timeouts} 轮 OAuth 超时，触发认证链路熔断",
             )
     if had_exception:
         return REROLL_ERROR_COOLDOWN, "本轮出现异常，使用保护性冷却"
@@ -518,7 +518,7 @@ def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="
                     stats.cpu_counter[current_platform] = stats.cpu_counter.get(current_platform, 0) + 1
                 if require_ip and current_external_ip:
                     stats.ip_counter[current_external_ip] = stats.ip_counter.get(current_external_ip, 0) + 1
-                stats.consecutive_oauth_timeouts = 0
+                stats.consecutive_auth_timeouts = 0
                 result_parts = []
                 if require_amd:
                     result_parts.append(current_platform)
@@ -587,7 +587,7 @@ def reroll_target_loop(project_id: Any,  instance_info: Any,  target_mode: Any="
                 had_exception=had_exception,
                 stop_wait_seconds=stop_wait_seconds,
                 exception_kind=exception_kind,
-                consecutive_oauth_timeouts=stats.consecutive_oauth_timeouts,
+                consecutive_auth_timeouts=stats.consecutive_auth_timeouts,
             )
             cooldown = apply_jitter(
                 cooldown_base,
